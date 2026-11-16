@@ -397,6 +397,8 @@ select.mini:focus{border-color:var(--accent);color:var(--text)}
 }
 
 .wall.has-series .series-card{grid-column:span 2}
+html[data-size="medium"] .wall.has-series .series-card .series-stack{width:150px}
+html[data-size="large"] .wall.has-series .series-card .series-stack{width:min(42%,300px)}
 .series-card{
   position:relative;display:flex;gap:14px;align-items:stretch;padding:12px;
   background:var(--panel);border:1px solid rgba(255,255,255,.06);border-radius:var(--radius);
@@ -716,13 +718,15 @@ html[data-theme="shelf"] .wall{
   background:
     repeating-linear-gradient(90deg,rgba(0,0,0,.05) 0 1px,transparent 1px 13px),
     repeating-linear-gradient(180deg,
-      transparent 0 225px,
-      rgba(0,0,0,.42) 225px 226px,
-      var(--plank) 226px 237px,
-      var(--plank-top) 237px 238px,
-      var(--plank-edge) 238px 242px,
-      transparent 242px 259px);
+      transparent 0 var(--book-h),
+      rgba(0,0,0,.42) var(--book-h) calc(var(--book-h) + 1px),
+      var(--plank) calc(var(--book-h) + 1px) calc(var(--book-h) + 12px),
+      var(--plank-top) calc(var(--book-h) + 12px) calc(var(--book-h) + 13px),
+      var(--plank-edge) calc(var(--book-h) + 13px) calc(var(--book-h) + 17px),
+      transparent calc(var(--book-h) + 17px) calc(var(--book-h) + 34px));
 }
+html[data-theme="shelf"][data-size="medium"] .wall{--book-w:200px;--book-h:300px}
+html[data-theme="shelf"][data-size="large"] .wall{--book-w:300px;--book-h:450px}
 html[data-theme="shelf"] .card{
   height:var(--book-h);
   background:var(--book);

@@ -28,13 +28,14 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 SIBLING_BACKUP_DIR = os.path.join(os.path.dirname(BASE_DIR), "娱乐档案_备份")
 LIB_PATH = os.path.join(DATA_DIR, "library.json")
+IMAGE_CACHE_DIR = os.path.join(DATA_DIR, "image_cache")
 PORT = int(os.environ.get("GRDAG_PORT", "8777"))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -229,7 +230,7 @@ def new_id(prefix):
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, COVER_DIR, BACKUP_DIR, WEB_DIR):
+    for d in (DATA_DIR, COVER_DIR, IMAGE_CACHE_DIR, BACKUP_DIR, WEB_DIR):
         os.makedirs(d, exist_ok=True)
 
 
@@ -345,10 +346,18 @@ def extract_library_zip(raw):
 
 # ---------------------------------------------------------------- 网络层
 _proxy_cache = {"at": 0.0, "value": None, "source": None}
+_proxy_lock = threading.Lock()
+PROXY_CACHE_TTL = 600
+PROXY_NEGATIVE_TTL = 30
 PROXY_PORTS = ["7897", "7890", "10808", "1080", "8888", "10809", "2080", "8118"]
+IMAGE_HOST_SUFFIXES = (
+    "bgm.tv", "doubanio.com", "douban.com", "steamstatic.com",
+    "steamcdn-a.akamaihd.net", "hdslb.com", "biliimg.com", "qq.com",
+    "hongguoduanju.com", "douyinpic.com", "byteimg.com",
+)
 
 
-def _bgm_probe(proxy_url, timeout=5):
+def _bgm_probe(proxy_url, timeout=3):
     try:
         op = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
         req = Request("https://api.bgm.tv/v0/subjects/253046", headers={"User-Agent": UA_BGM})
@@ -358,10 +367,14 @@ def _bgm_probe(proxy_url, timeout=5):
         return False
 
 
-def detect_proxy():
-    for port in PROXY_PORTS:
+def detect_proxy(preferred_port=""):
+    ports = list(PROXY_PORTS)
+    preferred = str(preferred_port or "").strip()
+    if preferred:
+        ports = [preferred] + [p for p in ports if p != preferred]
+    for port in ports:
         try:
-            socket.create_connection(("127.0.0.1", int(port)), timeout=0.3).close()
+            socket.create_connection(("127.0.0.1", int(port)), timeout=0.25).close()
         except Exception:
             continue
         url = f"http://127.0.0.1:{port}"
@@ -372,16 +385,29 @@ def detect_proxy():
 
 def resolve_proxy(force=False):
     lib = load_library()
-    cfg = (lib.get("settings", {}).get("proxy") or "auto").strip()
+    settings = lib.get("settings", {})
+    cfg = (settings.get("proxy") or "auto").strip()
     if cfg not in ("auto", ""):
         if cfg.lower() in ("direct", "none", "off", "关闭"):
             return None
         return cfg
-    if not force and (time.time() - _proxy_cache["at"]) < 180 and _proxy_cache["at"]:
-        return _proxy_cache["value"]
-    val, src = detect_proxy()
-    _proxy_cache.update({"at": time.time(), "value": val, "source": src})
-    return val
+    with _proxy_lock:
+        now = time.time()
+        cached = _proxy_cache["value"]
+        age = now - (_proxy_cache["at"] or 0)
+        if not force:
+            if cached and age < PROXY_CACHE_TTL:
+                return cached
+            if not cached and _proxy_cache["at"] and age < PROXY_NEGATIVE_TTL:
+                return None
+            if cached:
+                # 缓存过期时只复验原代理，避免每次把 8 个端口全扫一遍
+                if _bgm_probe(cached, 3):
+                    _proxy_cache["at"] = now
+                    return cached
+        val, src = detect_proxy(settings.get("proxy_port"))
+        _proxy_cache.update({"at": time.time(), "value": val, "source": src})
+        return val
 
 
 def http_get(url, headers=None, proxy=None, timeout=12, data=None, method=None):
@@ -403,47 +429,124 @@ def http_json(url, headers=None, proxy=None, timeout=12, data=None, method=None)
     return json.loads(body.decode("utf-8", "ignore"))
 
 
-def save_cover(url, referer=None, proxy=False, timeout=18):
+def image_proxy_url(url):
+    """把远程图片换成同源代理地址，避免浏览器直连墙外的图片站。"""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    return "/api/img?url=" + quote(url, safe="")
+
+
+def _is_image_url_allowed(url):
+    try:
+        u = urlparse(url)
+    except Exception:
+        return False
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return False
+    host = u.hostname.lower()
+    return any(host == s or host.endswith("." + s) for s in IMAGE_HOST_SUFFIXES)
+
+
+def _image_ext(body, url):
+    if body[:4] == b"\x89PNG":
+        return ".png"
+    if body[:4] == b"RIFF":
+        return ".webp"
+    if body[:2] == b"\xff\xd8":
+        return ".jpg"
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    return ext if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+
+
+def _download_image(url, referer=None, timeout=10, want_proxy=False):
+    """下载图片。Bangumi 图片直连必超时，有代理时只走代理，不再白等一轮直连。"""
+    host = (urlparse(url).hostname or "").lower()
+    is_bgm = host.endswith("bgm.tv")
+    proxy_url = None
+    if want_proxy or is_bgm:
+        try:
+            proxy_url = resolve_proxy()
+        except Exception:
+            proxy_url = None
+    attempts = []
+    if proxy_url:
+        attempts.append(proxy_url)
+        if not is_bgm:
+            attempts.append(None)
+    else:
+        attempts.append(None)
+    for idx, px in enumerate(attempts):
+        try:
+            headers = {"Referer": referer} if referer else None
+            t = timeout if idx == 0 else min(5, timeout)
+            status, body, final, _ = http_get(url, headers=headers, proxy=px, timeout=t)
+            if status == 200 and len(body) >= 800:
+                return body
+        except Exception:
+            continue
+    return None
+
+
+def _cached_image_path(url):
+    key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
+    for ext in (".jpg", ".png", ".webp", ".gif"):
+        path = os.path.join(IMAGE_CACHE_DIR, key + ext)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def cache_remote_image(url):
+    """下载并缓存远程预览图，返回本地文件路径；失败返回 None。"""
+    if not _is_image_url_allowed(url):
+        return None
+    try:
+        ensure_dirs()
+    except Exception:
+        return None
+    cached = _cached_image_path(url)
+    if cached:
+        return cached
+    body = _download_image(url, referer="https://bgm.tv/" if "bgm.tv" in url else None,
+                           timeout=8, want_proxy=True)
+    if not body:
+        return None
+    ext = _image_ext(body, url)
+    key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
+    dst = os.path.join(IMAGE_CACHE_DIR, key + ext)
+    tmp = dst + "." + uuid.uuid4().hex[:6] + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(body)
+        os.replace(tmp, dst)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return None
+    return dst
+
+
+def save_cover(url, referer=None, proxy=False, timeout=10):
     if not url:
         return None
     url = url.strip()
     if url.startswith("/covers/") or url.startswith("covers/"):
         return url
-    proxy_url = None
-    if proxy:
-        try:
-            proxy_url = resolve_proxy()
-        except Exception:
-            proxy_url = None
-    attempts = [proxy_url] if proxy_url else [None]
-    if proxy_url:
-        attempts.append(None)
-    for px in attempts:
-        try:
-            headers = {"Referer": referer} if referer else None
-            status, body, final, _ = http_get(url, headers=headers, proxy=px, timeout=timeout)
-            if status != 200 or len(body) < 800:
-                continue
-            ctype = "image/jpeg"
-            low = body[:12]
-            if low[:4] == b"\x89PNG":
-                ext, ctype = ".png", "image/png"
-            elif low[:4] == b"RIFF":
-                ext, ctype = ".webp", "image/webp"
-            elif low[:2] == b"\xff\xd8":
-                ext, ctype = ".jpg", "image/jpeg"
-            else:
-                ext = os.path.splitext(urlparse(url).path)[1].lower()
-                if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-                    ext = ".jpg"
-            name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ext
-            ensure_dirs()
-            with open(os.path.join(COVER_DIR, name), "wb") as f:
-                f.write(body)
-            return "covers/" + name
-        except Exception:
-            continue
-    return None
+    body = _download_image(url, referer=referer, timeout=timeout, want_proxy=proxy)
+    if not body:
+        return None
+    ext = _image_ext(body, url)
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ext
+    ensure_dirs()
+    try:
+        with open(os.path.join(COVER_DIR, name), "wb") as f:
+            f.write(body)
+    except Exception:
+        return None
+    return "covers/" + name
 
 
 # ---------------------------------------------------------------- 源：Bangumi
@@ -483,18 +586,19 @@ def bangumi_search(keyword, category):
     for t in types:
         url = ("https://api.bgm.tv/search/subject/" + quote(keyword) +
                f"?type={t}&responseGroup=large&max_results=10")
-        j = http_json(url, headers={"User-Agent": UA_BGM}, proxy=resolve_proxy())
+        j = http_json(url, headers={"User-Agent": UA_BGM}, proxy=resolve_proxy(), timeout=8)
         for it in (j.get("list") or []):
             sid = it.get("id")
             if sid in seen:
                 continue
             seen.add(sid)
             imgs = it.get("images") or {}
+            pic = imgs.get("common") or imgs.get("medium") or imgs.get("small") or imgs.get("large")
             out.append({
                 "title": it.get("name_cn") or it.get("name") or "",
                 "subtitle": it.get("name") if (it.get("name_cn") and it.get("name") != it.get("name_cn")) else "",
                 "year": (it.get("air_date") or "")[:4],
-                "cover": imgs.get("large") or imgs.get("common") or imgs.get("medium"),
+                "cover": image_proxy_url(pic),
                 "meta": (it.get("name") or "") + (" · " + it.get("air_date") if it.get("air_date") else ""),
                 "ref": {"source": "bangumi", "id": sid, "url": f"https://bgm.tv/subject/{sid}"},
             })
@@ -503,11 +607,13 @@ def bangumi_search(keyword, category):
 
 def bangumi_draft(ref):
     sid = ref.get("id")
-    detail = http_json(f"https://api.bgm.tv/v0/subjects/{sid}", headers={"User-Agent": UA_BGM}, proxy=resolve_proxy())
+    detail = http_json(f"https://api.bgm.tv/v0/subjects/{sid}", headers={"User-Agent": UA_BGM},
+                       proxy=resolve_proxy(), timeout=8)
     infobox = _infobox_pairs(detail.get("infobox"))
     rating = detail.get("rating") or {}
     tags = [t.get("name") for t in (detail.get("tags") or [])[:10] if t.get("name")]
     imgs = detail.get("images") or {}
+    pic = imgs.get("common") or imgs.get("medium") or imgs.get("large")
     date = detail.get("date") or ""
     creators = _creators_from_infobox(detail.get("infobox") or [])
     return {
@@ -515,7 +621,8 @@ def bangumi_draft(ref):
         "originalTitle": detail.get("name") or "",
         "aliases": [detail.get("name")] if detail.get("name") else [],
         "year": date[:4],
-        "coverUrl": imgs.get("large") or imgs.get("common"),
+        "coverUrl": pic,
+        "previewUrl": image_proxy_url(pic),
         "coverProxy": True,
         "coverReferer": "https://bgm.tv/",
         "summary": strip_html(detail.get("summary")),
@@ -1422,6 +1529,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(os.path.join(COVER_DIR, os.path.basename(p)))
             if p.startswith("/static/"):
                 return self.serve_file(os.path.join(WEB_DIR, os.path.basename(p)))
+            if p == "/api/img":
+                img_url = (qs.get("url") or [""])[0]
+                cached = cache_remote_image(img_url)
+                if not cached:
+                    self._send(502, "image unavailable", "text/plain; charset=utf-8")
+                    return
+                return self.serve_file(cached)
             if p == "/api/bootstrap":
                 lib = load_library()
                 proxy = resolve_proxy()
@@ -1513,13 +1627,27 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/works/([^/]+)$", u.path)
         if not m:
             return self._send(404, "{}", "application/json")
+        wid = m.group(1)
+        with _lock:
+            lib = load_library()
+            existing = next((w for w in lib["works"] if w["id"] == wid), None)
+        if existing is None:
+            return self.send_json({"ok": False, "error": "not found"}, 404)
+        merged = dict(existing)
+        merged.update({k: v for k, v in body.items() if k not in ("id", "createdAt")})
+        # 封面下载可能耗时，放在锁外面，避免保存封面时把评分/经历等写入一起堵住
+        work = normalize_work(merged, existing=existing)
         with _lock:
             lib = load_library()
             for i, w in enumerate(lib["works"]):
-                if w["id"] == m.group(1):
-                    merged = dict(w)
-                    merged.update({k: v for k, v in body.items() if k not in ("id", "createdAt")})
-                    lib["works"][i] = normalize_work(merged, existing=w)
+                if w["id"] == wid:
+                    # 下载封面期间可能有评分/经历写入，基于最新记录再归一化一次，
+                    # 此时封面已是本地路径，不会再发起网络请求。
+                    merged2 = dict(w)
+                    merged2.update({k: v for k, v in body.items() if k not in ("id", "createdAt")})
+                    merged2["cover"] = work.get("cover") or w.get("cover") or ""
+                    final = normalize_work(merged2, existing=w)
+                    lib["works"][i] = final
                     save_library(lib)
                     return self.send_json({"ok": True, "work": work_view(lib["works"][i])})
         return self.send_json({"ok": False, "error": "not found"}, 404)

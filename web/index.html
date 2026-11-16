@@ -6,9 +6,10 @@
 <title>娱乐档案 · 个人档案馆</title>
 <script>
 try{
-  var m = localStorage.getItem('grdag_mode'), t = localStorage.getItem('grdag_theme');
+  var m = localStorage.getItem('grdag_mode'), t = localStorage.getItem('grdag_theme'), z = localStorage.getItem('grdag_size');
   if (m) document.documentElement.dataset.mode = m;
   if (t) document.documentElement.dataset.theme = t;
+  if (z) document.documentElement.dataset.size = z;
 }catch(e){}
 </script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2312171d'/%3E%3Crect x='12' y='14' width='40' height='9' rx='2' fill='%23d3a15f'/%3E%3Cpath d='M16 23v27h32V23' stroke='%23d3a15f' stroke-width='3' fill='none'/%3E%3Cpath d='M26 33h12' stroke='%23d3a15f' stroke-width='3'/%3E%3C/svg%3E">
@@ -71,6 +72,11 @@ try{
   <div class="seg" id="groupSeg">
     <button data-group="series" class="on">系列折叠</button>
     <button data-group="flat">平铺</button>
+  </div>
+  <div class="seg" id="sizeSeg" title="主页每行显示数量">
+    <button data-size="small" class="on">小</button>
+    <button data-size="medium">中</button>
+    <button data-size="large">大</button>
   </div>
   <button class="btn btn-sm" id="newSeriesBtn">＋ 新建系列</button>
 </div>

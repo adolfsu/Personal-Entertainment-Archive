@@ -33,7 +33,9 @@ const S = {
 const APPEARANCE = {
   mode: localStorage.getItem("grdag_mode") || "dark",
   theme: localStorage.getItem("grdag_theme") || "stage",
+  size: localStorage.getItem("grdag_size") || "small",
 };
+const SIZE_LABEL = { small: "小", medium: "中", large: "大" };
 const MODE_ICON = {
   dark: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8.2 8.2 0 1 0 10.5 10.5z"/></svg>',
   light: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.7 5.7l1.4 1.4M16.9 16.9l1.4 1.4M18.3 5.7l-1.4 1.4M7.1 16.9l-1.4 1.4"/></svg>',
@@ -46,10 +48,12 @@ const THEME_ICON = {
 function applyAppearance(save = true) {
   document.documentElement.dataset.mode = APPEARANCE.mode;
   document.documentElement.dataset.theme = APPEARANCE.theme;
+  document.documentElement.dataset.size = APPEARANCE.size;
   if (save) {
     try {
       localStorage.setItem("grdag_mode", APPEARANCE.mode);
       localStorage.setItem("grdag_theme", APPEARANCE.theme);
+      localStorage.setItem("grdag_size", APPEARANCE.size);
     } catch (e) {}
   }
   const mBtn = el("#modeBtn");
@@ -64,6 +68,8 @@ function applyAppearance(save = true) {
   }
   elAll("#setModeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.mode));
   elAll("#setThemeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.theme));
+  elAll("#sizeSeg button").forEach(b => b.classList.toggle("on", b.dataset.size === APPEARANCE.size));
+  applyWallDensity();
 }
 
 function setMode(mode) {
@@ -77,6 +83,38 @@ function setTheme(theme) {
   applyAppearance();
   toast(APPEARANCE.theme === "shelf" ? "已切到书架主题" : "已切回展厅主题");
 }
+
+/* 主页每行显示数量：小 = 现有自动列数；中 = 约 75%；大 = 约 50%。
+   展厅用固定列数精确控制；书架由 CSS 按 data-size 放大书本尺寸。 */
+function applyWallDensity() {
+  const wall = el("#wall");
+  if (!wall) return;
+  if (APPEARANCE.theme !== "stage" || APPEARANCE.size === "small") {
+    wall.style.gridTemplateColumns = "";
+    return;
+  }
+  wall.style.gridTemplateColumns = "";
+  const raw = getComputedStyle(wall).gridTemplateColumns;
+  let base = (raw && raw !== "none") ? raw.trim().split(/\s+/).filter(Boolean).length : 0;
+  if (!base) base = Math.max(1, Math.floor((wall.clientWidth + 18) / (136 + 18)));
+  const factor = APPEARANCE.size === "medium" ? 0.75 : 0.5;
+  const cols = Math.max(1, Math.round(base * factor));
+  wall.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+}
+
+function setSize(size) {
+  APPEARANCE.size = ["small", "medium", "large"].includes(size) ? size : "small";
+  applyAppearance();
+  const raw = getComputedStyle(el("#wall")).gridTemplateColumns;
+  const n = (raw && raw !== "none") ? raw.trim().split(/\s+/).filter(Boolean).length : 0;
+  toast(n ? `每行显示约 ${n} 部（${SIZE_LABEL[APPEARANCE.size]}）` : `已切到${SIZE_LABEL[APPEARANCE.size]}显示`);
+}
+
+let densityTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(densityTimer);
+  densityTimer = setTimeout(applyWallDensity, 150);
+});
 
 const el = (sel, root = document) => root.querySelector(sel);
 const elAll = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -930,7 +968,7 @@ function renderForm() {
   const rfCur = rfSources.includes(a.refSource) ? a.refSource : (rfSources[0] || "");
   body.innerHTML = `
     <div class="cover-preview" style="margin-bottom:16px">
-      <div class="cp-box">${d.coverUrl ? `<img id="cpImg" src="${esc(d.coverUrl)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
+      <div class="cp-box">${(d.previewUrl || d.coverUrl) ? `<img id="cpImg" src="${esc(d.previewUrl || d.coverUrl)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
       <div class="cp-info">
         <div>封面来自：${esc((d.source && (d.source.label || d.source.name)) || "手动")}</div>
         <div>${d.coverUrl ? "保存时会下载到本地，断网也能显示" : "没有封面，卡片会显示分类占位图"}</div>
@@ -1177,7 +1215,7 @@ function openSettings() {
       <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
       <button class="btn btn-danger" id="wipeAll">清空全部数据</button>
     </div>
-    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.0.0")} · 所有数据只存在这台电脑上</div>`;
+    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.1.0")} · 所有数据只存在这台电脑上</div>`;
   el("#settingsModal").classList.add("show");
   applyAppearance(false);
   el("#setModeSeg").onclick = (e) => {
@@ -1291,6 +1329,7 @@ function bindGlobal() {
     elAll("#groupSeg button").forEach(x => x.classList.toggle("on", x === b));
     renderWall();
   });
+  elAll("#sizeSeg button").forEach(b => b.onclick = () => setSize(b.dataset.size));
   el("#newSeriesBtn").onclick = () => openSeriesModal();
   el("#seriesClose").onclick = closeSeriesModal;
   el("#seriesCancel").onclick = closeSeriesModal;
