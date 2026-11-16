@@ -1,0 +1,1323 @@
+/* 娱乐档案 · 前端逻辑（原生 JS，无依赖） */
+const GENERIC_STATUS = { not_started: "未开始", planned: "计划中", active: "进行中", completed: "已完成", paused: "搁置", dropped: "弃坑" };
+const CAT_ORDER = ["anime", "manga", "game", "novel", "book", "movie", "shortdrama"];
+const EXPECT_FIELDS = {
+  anime: ["放送开始", "话数", "导演", "制作"],
+  manga: ["连载杂志", "册数", "作者"],
+  game: ["平台", "游戏类型", "发行日期", "开发商"],
+  novel: ["作者", "字数"],
+  book: ["出版社", "页数", "ISBN"],
+  movie: ["上映日", "片长", "导演"],
+  shortdrama: ["集数", "上线日期"],
+};
+const ICONS = {
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
+  archive: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4"/><path d="M5 8v12h14V8M10 12h4"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  more: '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>',
+};
+
+const S = {
+  version: "", works: [], series: [], seriesKinds: {}, seriesRoles: {}, settings: {}, categories: [], sourceLabels: {},
+  filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
+  currentId: null, currentSeriesId: null,
+  drawerRating: 8, seriesRating: 8,
+  add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false },
+  seriesDraft: { mode: "create", attachTo: null },
+  backups: [],
+};
+
+/* ------------------------------------------------------------ 外观（明暗 / 主题） */
+const APPEARANCE = {
+  mode: localStorage.getItem("grdag_mode") || "dark",
+  theme: localStorage.getItem("grdag_theme") || "stage",
+};
+const MODE_ICON = {
+  dark: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8.2 8.2 0 1 0 10.5 10.5z"/></svg>',
+  light: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.7 5.7l1.4 1.4M16.9 16.9l1.4 1.4M18.3 5.7l-1.4 1.4M7.1 16.9l-1.4 1.4"/></svg>',
+};
+const THEME_ICON = {
+  stage: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="1.5"/><path d="M8 21h8M12 17v4"/></svg>',
+  shelf: '<svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H19"/><path d="M8 7h7M8 10h5"/></svg>',
+};
+
+function applyAppearance(save = true) {
+  document.documentElement.dataset.mode = APPEARANCE.mode;
+  document.documentElement.dataset.theme = APPEARANCE.theme;
+  if (save) {
+    try {
+      localStorage.setItem("grdag_mode", APPEARANCE.mode);
+      localStorage.setItem("grdag_theme", APPEARANCE.theme);
+    } catch (e) {}
+  }
+  const mBtn = el("#modeBtn");
+  if (mBtn) {
+    mBtn.innerHTML = MODE_ICON[APPEARANCE.mode] || MODE_ICON.dark;
+    mBtn.title = APPEARANCE.mode === "dark" ? "当前深色，点击切浅色" : "当前浅色，点击切深色";
+  }
+  const tBtn = el("#themeBtn");
+  if (tBtn) {
+    tBtn.innerHTML = THEME_ICON[APPEARANCE.theme] || THEME_ICON.stage;
+    tBtn.title = APPEARANCE.theme === "stage" ? "当前展厅主题，点击切书架" : "当前书架主题，点击切展厅";
+  }
+  elAll("#setModeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.mode));
+  elAll("#setThemeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.theme));
+}
+
+function setMode(mode) {
+  APPEARANCE.mode = mode === "light" ? "light" : "dark";
+  applyAppearance();
+  toast(APPEARANCE.mode === "dark" ? "已切到深色模式" : "已切到浅色模式");
+}
+
+function setTheme(theme) {
+  APPEARANCE.theme = theme === "shelf" ? "shelf" : "stage";
+  applyAppearance();
+  toast(APPEARANCE.theme === "shelf" ? "已切到书架主题" : "已切回展厅主题");
+}
+
+const el = (sel, root = document) => root.querySelector(sel);
+const elAll = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+function bufToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtScore(v) { return (v == null || v === "") ? "" : Number(v).toFixed(1); }
+
+async function api(path, opts = {}) {
+  const o = { headers: { "Content-Type": "application/json" } };
+  if (opts.method) o.method = opts.method;
+  if (opts.body) o.body = JSON.stringify(opts.body);
+  const res = await fetch(path, o);
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (e) { return { ok: false, error: "响应解析失败" }; }
+}
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = el("#toast");
+  t.textContent = msg;
+  t.classList.toggle("err", !!isErr);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2800);
+}
+
+/* ------------------------------------------------------------ 初始化 */
+async function boot() {
+  const data = await api("/api/bootstrap");
+  if (!data || !data.works) { toast("无法连接本地服务，请确认 server.py 正在运行", true); return; }
+  S.works = data.works;
+  S.series = data.series || [];
+  S.seriesKinds = data.seriesKinds || {};
+  S.seriesRoles = data.seriesRoles || {};
+  S.settings = data.settings || {};
+  S.version = data.version || "";
+  const sub = el("#brandSub");
+  if (sub && S.version) sub.textContent = `PERSONAL ARCHIVE · v${S.version}`;
+  if (S.version) document.title = `娱乐档案 v${S.version} · 个人档案馆`;
+  S.categories = data.categories || [];
+  S.sourceLabels = data.sourceLabels || {};
+  window.__proxy = data.proxyActive || "未探测到可用代理";
+  renderTabs();
+  renderStatusChips();
+  renderWall();
+  renderStats();
+  bindGlobal();
+}
+
+async function reloadAll() {
+  const b = await api("/api/bootstrap");
+  if (!b || !b.works) return;
+  S.works = b.works;
+  S.series = b.series || [];
+  renderTabs(); renderStatusChips(); renderWall(); renderStats();
+}
+
+function catLabel(key) {
+  const c = S.categories.find(x => x.key === key);
+  return c ? c.label : key;
+}
+function statusLabel(work) {
+  const cat = S.categories.find(c => c.key === work.category);
+  return (cat && cat.statuses[work.status]) || GENERIC_STATUS[work.status] || "未开始";
+}
+function genericLabel(key) {
+  return GENERIC_STATUS[key] || key;
+}
+
+/* ------------------------------------------------------------ 筛选与墙 */
+function renderTabs() {
+  const counts = { all: S.works.length };
+  CAT_ORDER.forEach(k => counts[k] = 0);
+  S.works.forEach(w => { counts[w.category] = (counts[w.category] || 0) + 1; });
+  const tabs = [["all", "全部"]].concat(CAT_ORDER.map(k => [k, catLabel(k)]));
+  el("#tabs").innerHTML = tabs.map(([k, label]) =>
+    `<button class="tab ${S.filters.cat === k ? "active" : ""}" data-cat="${k}">${esc(label)}<span class="count">${counts[k] || 0}</span></button>`
+  ).join("");
+  elAll("#tabs .tab").forEach(b => b.onclick = () => {
+    S.filters.cat = b.dataset.cat;
+    S.filters.status = "all";
+    renderTabs(); renderStatusChips(); renderWall();
+  });
+}
+
+function renderStatusChips() {
+  const keys = ["all", "active", "completed", "planned", "paused", "dropped", "not_started"];
+  const cat = S.filters.cat;
+  const labels = { all: "全部状态" };
+  keys.slice(1).forEach(k => labels[k] = cat === "all" ? genericLabel(k) : ((S.categories.find(c => c.key === cat) || {}).statuses || GENERIC_STATUS)[k]);
+  el("#statusChips").innerHTML = keys.map(k =>
+    `<button class="chip ${S.filters.status === k ? "active" : ""}" data-status="${k}">${esc(labels[k])}</button>`
+  ).join("");
+  elAll("#statusChips .chip").forEach(b => b.onclick = () => {
+    S.filters.status = b.dataset.status;
+    renderStatusChips(); renderWall();
+  });
+}
+
+function timeCutoff(preset) {
+  const now = new Date();
+  if (preset === "y") return `${now.getFullYear()}-01-01`;
+  if (preset === "m12") { const d = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); return d.toISOString().slice(0, 10); }
+  if (preset === "y3") return `${now.getFullYear() - 3}-01-01`;
+  return null;
+}
+
+function visibleWorks() {
+  const f = S.filters;
+  const cutoff = timeCutoff(f.time);
+  const q = f.q.trim().toLowerCase();
+  let list = S.works.filter(w => {
+    if (f.cat !== "all" && w.category !== f.cat) return false;
+    if (f.status !== "all" && w.status !== f.status) return false;
+    if (cutoff && (w.createdAt || "").slice(0, 10) < cutoff) return false;
+    if (q) {
+      const hay = [w.title, w.originalTitle, (w.aliases || []).join(" "), (w.tags || []).join(" "), w.summary,
+        (w.creators || []).map(c => c.role + c.name).join(" "),
+        (w.infobox || []).map(i => i.key + i.value).join(" "),
+        (w.userFields || []).map(i => i.key + i.value).join(" "),
+        (w.experiences || []).map(e => e.content).join(" ")].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const sort = f.sort;
+  list.sort((a, b) => {
+    if (sort === "scoreDesc") return (b.rating ?? -1) - (a.rating ?? -1);
+    if (sort === "scoreAsc") return (a.rating ?? 99) - (b.rating ?? 99);
+    if (sort === "title") return (a.title || "").localeCompare(b.title || "", "zh");
+    if (sort === "activity") return (b.lastExperienceAt || b.createdAt || "").localeCompare(a.lastExperienceAt || a.createdAt || "");
+    return (b.createdAt || "").localeCompare(a.createdAt || "");
+  });
+  return list;
+}
+
+function seriesById(id) { return S.series.find(s => s.id === id) || null; }
+function seriesNameOf(w) { const s = w.primarySeriesId ? seriesById(w.primarySeriesId) : null; return s ? s.name : ""; }
+
+function cardHTML(w) {
+  const cover = w.coverUrl
+    ? `<img src="${esc(w.coverUrl)}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-cover')">`
+    : "";
+  const sName = seriesNameOf(w);
+  return `<article class="card" data-id="${w.id}" data-cat="${w.category}">
+    <div class="card-cover${w.coverUrl ? " has-cover" : ""}">
+      <div class="cover-fallback"><span>${esc(catLabel(w.category))}</span></div>
+      ${cover}
+      <div class="card-veil"></div>
+      <div class="cat-mark">${esc(catLabel(w.category))}</div>
+      ${sName ? `<div class="series-mark">${esc(sName)}</div>` : ""}
+      <div class="score-badge ${w.rating == null ? "none" : ""}">${w.rating == null ? "未评" : fmtScore(w.rating)}</div>
+      <div class="card-meta">
+        <div class="card-title">${esc(w.title)}</div>
+        <div class="card-sub"><span class="pill" data-status="${w.status}">${esc(statusLabel(w))}</span>${w.year ? `<span>${esc(w.year)}</span>` : ""}</div>
+      </div>
+    </div>
+  </article>`;
+}
+
+function seriesCardHTML(s, list) {
+  const vis = s.members.filter(m => list.some(w => w.id === m.id));
+  const stack = s.members.slice().reverse().slice(0, 3);
+  const covers = stack.map((m, i) => `<div class="ss-cover" style="--i:${i}">
+      ${m.coverUrl
+        ? `<img src="${esc(m.coverUrl)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+        : `<div class="ss-fallback">${esc(catLabel(m.category))}</div>`}
+    </div>`).join("");
+  const mix = s.catMix.map(c => `${c.label} ${c.count}`).join(" · ");
+  const countBadge = s.memberCount ? `<div class="ss-count">${s.memberCount}</div>` : "";
+  return `<article class="series-card" data-sid="${s.id}">
+    <span class="series-badge">系列</span>
+    ${stack.length ? `<div class="series-stack">${covers}${countBadge}</div>`
+      : `<div class="series-stack empty"><span class="ss-add">＋</span></div>`}
+    <div class="series-info">
+      <div class="series-name">${esc(s.name)}</div>
+      <div class="series-sub"><span class="pill" data-status="${s.baseStatus}">${esc(s.baseStatusLabel)}</span>${s.yearRange ? `<span>${esc(s.yearRange)}</span>` : ""}</div>
+      <div class="series-mix">${stack.length
+        ? esc(`${mix}${s.avgRating != null ? ` · 均分 ${fmtScore(s.avgRating)}` : ""} · 已完成 ${s.progress}`)
+        : "还没有成员，点进来添加"}</div>
+    </div>
+  </article>`;
+}
+
+function renderWall() {
+  const list = visibleWorks();
+  if (!list.length) {
+    el("#wall").innerHTML = `<div class="empty">${ICONS.archive}<div>${S.works.length ? "当前筛选下没有作品" : "档案还是空的。点右上角「添加作品」，从 Bangumi / 豆瓣 / 微信读书 / Steam 拉取信息，或粘贴链接自动填写。"}</div></div>`;
+    el("#wall").className = "wall";
+    return;
+  }
+  if (S.filters.group === "series" && S.series.length) {
+    const seen = new Set();
+    const parts = [];
+    list.forEach(w => {
+      const sid = w.primarySeriesId;
+      const s = sid ? seriesById(sid) : null;
+      if (s) {
+        if (seen.has(sid)) return;
+        seen.add(sid);
+        parts.push(seriesCardHTML(s, list));
+      } else {
+        parts.push(cardHTML(w));
+      }
+    });
+    const defaultView = S.filters.cat === "all" && S.filters.status === "all" && !S.filters.q.trim();
+    if (defaultView) {
+      S.series.forEach(s2 => {
+        if (s2.memberCount === 0 && !seen.has(s2.id)) parts.push(seriesCardHTML(s2, list));
+      });
+    }
+    el("#wall").innerHTML = parts.join("");
+    el("#wall").className = "wall has-series";
+  } else {
+    el("#wall").innerHTML = list.map(cardHTML).join("");
+    el("#wall").className = "wall";
+  }
+  elAll("#wall .card").forEach(c => c.onclick = () => openDrawer(c.dataset.id));
+  elAll("#wall .series-card").forEach(c => c.onclick = () => openSeries(c.dataset.sid));
+}
+
+function renderStats() {
+  const rated = S.works.filter(w => w.rating != null);
+  const avg = rated.length ? (rated.reduce((s, w) => s + w.rating, 0) / rated.length) : null;
+  const active = S.works.filter(w => w.status === "active").length;
+  el("#stats").innerHTML = [
+    `<span><b>${S.works.length}</b>部作品</span>`,
+    S.series.length ? `<span><b>${S.series.length}</b>个系列</span>` : "",
+    `<span><b>${rated.length}</b>部已评分</span>`,
+    avg != null ? `<span><b>${avg.toFixed(2)}</b>平均分</span>` : "",
+    `<span><b>${active}</b>部进行中</span>`,
+  ].join("");
+}
+
+/* ------------------------------------------------------------ 详情抽屉 */
+function findWork(id) { return S.works.find(w => w.id === id); }
+
+function openDrawer(id) {
+  S.currentId = id;
+  S.currentSeriesId = null;
+  const w = findWork(id);
+  if (!w) return;
+  S.drawerRating = w.rating == null ? 8 : w.rating;
+  el("#backdrop").classList.add("show");
+  el("#drawer").classList.add("show");
+  renderDrawer();
+}
+
+function openSeries(sid) {
+  const s = seriesById(sid);
+  if (!s) return;
+  S.currentSeriesId = sid;
+  S.currentId = null;
+  S.seriesRating = s.rating == null ? 8 : s.rating;
+  el("#backdrop").classList.add("show");
+  el("#drawer").classList.add("show");
+  renderDrawer();
+}
+
+function closeDrawer() {
+  el("#backdrop").classList.remove("show");
+  el("#drawer").classList.remove("show");
+  S.currentId = null;
+  S.currentSeriesId = null;
+}
+
+function kvHTML(k, v, wrap) {
+  return `<div class="kv"><div class="k">${esc(k)}</div><div class="v ${wrap ? "wrap" : ""}" title="${esc(v)}">${esc(v)}</div></div>`;
+}
+
+function sparkline(history) {
+  if (!history || history.length < 2) return "";
+  const n = history.length;
+  const W = 320, H = 64, pad = 8;
+  const x = i => pad + (i * (W - pad * 2)) / (n - 1);
+  const y = v => H - pad - (Math.max(0, Math.min(10, v)) / 10) * (H - pad * 2);
+  let d = "";
+  history.forEach((h, i) => { d += `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(h.score).toFixed(1)} `; });
+  const dots = history.map((h, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(h.score).toFixed(1)}" r="2.6" fill="#d3a15f"/>`).join("");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line x1="${pad}" y1="${y(5)}" x2="${W - pad}" y2="${y(5)}" stroke="#2a333d" stroke-dasharray="3 3"/>
+    <path d="${d}" fill="none" stroke="#d3a15f" stroke-width="1.6" stroke-linejoin="round"/>
+    ${dots}
+  </svg>`;
+}
+
+function renderDrawer() {
+  if (S.currentSeriesId) return renderSeriesDrawer();
+  const w = findWork(S.currentId);
+  if (!w) return;
+  const hist = w.ratingHistory || [];
+  const exps = w.experiences || [];
+  const infobox = w.infobox || [];
+  const lastId = w.currentExperienceId || (exps.length ? exps[exps.length - 1].id : null);
+  const curExp = exps.find(e => e.id === lastId) || null;
+  const curHint = curExp ? `状态取自经历日期最新的一条（${curExp.date || "—"}）` : "";
+  const head = el("#drawerHead");
+  const cover = `<div class="cover-fallback"><span>${esc(catLabel(w.category))}</span></div>` +
+    (w.coverUrl ? `<img src="${esc(w.coverUrl)}" alt="">` : "");
+  head.innerHTML = `
+    <div class="drawer-cover${w.coverUrl ? " has-cover" : ""}">${cover}</div>
+    <div style="min-width:0;flex:1">
+      <h2 class="drawer-title">${esc(w.title)}</h2>
+      <div class="drawer-sub">${esc([catLabel(w.category), w.year, ...(w.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
+      <div class="drawer-tags">
+        <span class="pill" data-status="${w.status}">${esc(statusLabel(w))}</span>
+        ${(w.tags || []).slice(0, 5).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
+      </div>
+      ${w.source && w.source.url ? `<div style="margin-top:8px;font-size:11px"><a href="${esc(w.source.url)}" target="_blank" rel="noreferrer" style="color:#8b949e;text-decoration:none;border-bottom:1px dotted #4a5561">${esc(w.source.label || w.source.name)} 条目</a></div>` : ""}
+    </div>
+    <button class="icon-btn drawer-close" id="drawerClose" title="关闭">${ICONS.close}</button>`;
+
+  const body = el("#drawerBody");
+  const bodyHTML = [];
+
+  /* 评分 */
+  bodyHTML.push(`<section class="section">
+    <div class="section-head"><h3>评分</h3><div class="line"></div>${w.ratingRef != null ? `<span class="hint">参考 ${fmtScore(w.ratingRef)}${w.ratingMeta && w.ratingMeta.total ? ` · ${w.ratingMeta.total} 人` : ""}</span>` : ""}</div>
+    <div class="rating-top">
+      <div class="rating-big ${w.rating == null ? "none" : ""}" id="ratingBig">${w.rating == null ? "未评分" : fmtScore(w.rating)}</div>
+      <div class="rating-meta">${hist.length ? `共修改 ${hist.length} 次<br>最近：${esc((hist[hist.length - 1].at || "").replace("T", " ").slice(0, 16))}` : "还没有评分记录"}<br>10 分制，0.5 步进</div>
+    </div>
+    <div class="rating-controls">
+      <input type="range" id="ratingRange" min="0" max="10" step="0.5" value="${S.drawerRating}">
+      <div class="score-num" id="ratingNum">${fmtScore(S.drawerRating)}</div>
+    </div>
+    <div class="rating-controls">
+      <input class="reason" id="ratingReason" placeholder="本次修改原因（可选）">
+      <button class="btn btn-primary btn-sm" id="ratingSave">记录评分</button>
+    </div>
+    ${sparkline(hist)}
+    ${hist.length ? `<div class="history">${hist.slice().reverse().map(h => `
+      <div class="history-row">
+        <div class="t">${esc((h.at || "").replace("T", " ").slice(0, 16))}</div>
+        <div class="delta">${h.prev == null ? "初评" : `<span class="${h.score >= h.prev ? "up" : "down"}">${fmtScore(h.prev)} → </span>`}<b>${fmtScore(h.score)}</b></div>
+        <div class="r" title="${esc(h.reason || "")}">${esc(h.reason || "")}</div>
+      </div>`).join("")}</div>` : ""}
+  </section>`);
+
+  /* 经历 */
+  bodyHTML.push(`<section class="section">
+    <div class="section-head"><h3>经历</h3><div class="line"></div><span class="hint">${esc(curHint || "按经历日期取最新一条")}</span></div>
+    <div class="exp-form">
+      <input type="date" id="expDate" value="${new Date().toISOString().slice(0, 10)}">
+      <select id="expStatus">${Object.entries((S.categories.find(c => c.key === w.category) || {}).statuses || GENERIC_STATUS)
+        .filter(([k]) => k !== "not_started")
+        .map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
+      <textarea id="expText" placeholder="这一条经历：看到哪了 / 玩到哪了 / 停下的原因…（可空）"></textarea>
+      <button class="btn btn-sm" id="expAdd">添加</button>
+    </div>
+    ${exps.length ? `<div class="timeline">${exps.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || "")).map(e => `
+      <div class="tl-item" data-status="${e.status}">
+        <div class="tl-head">
+          <span class="d">${esc(e.date || "")}</span>
+          <span class="pill" data-status="${e.status}">${esc(((S.categories.find(c => c.key === w.category) || {}).statuses || GENERIC_STATUS)[e.status] || e.status)}</span>
+          ${e.id === lastId ? `<span class="current-flag">当前状态</span>` : ""}
+          <button class="tl-del" data-del="${e.id}">删除</button>
+        </div>
+        ${e.content ? `<div class="tl-body">${esc(e.content)}</div>` : ""}
+      </div>`).join("")}</div>` : `<div class="muted-note">还没有经历记录。添加第一条后，作品状态会跟着它走。</div>`}
+  </section>`);
+
+  /* 所属系列 */
+  const wLinks = (w.seriesLinks || []).map(l => Object.assign({}, l, { name: (seriesById(l.id) || {}).name || "（系列已删除）" }));
+  const availSeries = S.series.filter(s => !wLinks.some(l => l.id === s.id));
+  bodyHTML.push(`<section class="section">
+    <div class="section-head"><h3>所属系列</h3><div class="line"></div><span class="hint">第一条为主系列，墙面按它折叠</span></div>
+    ${wLinks.length ? `<div class="series-links">${wLinks.map((l, i) => `<div class="sl-row">
+      <button class="sl-name" data-open-series="${l.id}">${esc(l.name)}</button>
+      <span class="tag">${esc(S.seriesRoles[l.role] || l.role)}</span>
+      ${i === 0 ? `<span class="sl-primary">主</span>` : ""}
+      <button class="btn btn-xs" data-unlink="${l.id}">移出</button>
+    </div>`).join("")}</div>` : `<div class="muted-note">还没归入任何系列。系列是手动划分的，可以先新建一个再归入。</div>`}
+    <div class="search-row" style="margin-top:10px">
+      <select id="linkSeries">${availSeries.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("") || `<option value="">（还没有系列）</option>`}</select>
+      <select id="linkRole" class="mini">${Object.entries(S.seriesRoles).map(([k, v]) => `<option value="${k}" ${k === "main" ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+      <button class="btn btn-sm" id="linkSeriesAdd">加入</button>
+      <button class="btn btn-sm btn-ghost" id="newSeriesForWork">＋ 新建系列</button>
+    </div>
+  </section>`);
+
+  /* 基础信息 */
+  const base = [];
+  if (w.year) base.push(kvHTML("年份", w.year));
+  (w.creators || []).forEach(c => base.push(kvHTML(c.role, c.name, true)));
+  if (w.source && w.source.label) base.push(kvHTML("来源", w.source.label));
+  if (w.ratingMeta && w.ratingMeta.rank) base.push(kvHTML("排名", "#" + w.ratingMeta.rank));
+  if (w.lastExperienceAt) base.push(kvHTML("最近经历", w.lastExperienceAt));
+  base.push(kvHTML("添加于", (w.createdAt || "").replace("T", " ").slice(0, 16)));
+  bodyHTML.push(`<section class="section">
+    <div class="section-head"><h3>基础信息</h3><div class="line"></div></div>
+    <div class="field-grid">${base.join("")}</div>
+    ${(w.tags || []).length ? `<div class="tags" style="margin-top:12px">${w.tags.map(t => `<span class="tag accent">${esc(t)}</span>`).join("")}</div>` : ""}
+    ${w.summary ? `<div class="muted-note" style="margin-top:12px;max-height:120px;overflow:auto">${esc(w.summary)}</div>` : ""}
+  </section>`);
+
+  /* 来源详情 */
+  if (infobox.length) {
+    const shown = infobox.slice(0, 8);
+    bodyHTML.push(`<section class="section">
+      <div class="section-head"><h3>来源详情</h3><div class="line"></div><span class="hint">${infobox.length} 项</span></div>
+      <div class="field-grid" id="infoboxGrid">${shown.map(i => kvHTML(i.key, i.value, i.value.length > 18)).join("")}</div>
+      ${infobox.length > 8 ? `<div id="infoboxMore" style="display:none"><div class="field-grid" style="margin-top:8px">${infobox.slice(8).map(i => kvHTML(i.key, i.value, i.value.length > 18)).join("")}</div></div><button class="collapse-btn" id="expandInfo">展开全部 ${infobox.length} 项</button>` : ""}
+    </section>`);
+  }
+
+  /* 我的字段 */
+  bodyHTML.push(`<section class="section">
+    <div class="section-head"><h3>我的字段</h3><div class="line"></div></div>
+    <div class="field-grid" id="userFieldsGrid">${(w.userFields || []).map(i => kvHTML(i.key, i.value, true)).join("") || `<div class="muted-note">可以加任意自己的字段，比如「通关时长」「二刷日期」「借给谁了」。</div>`}</div>
+    <div class="search-row" style="margin-top:10px">
+      <input id="ufKey" placeholder="字段名，如 通关时长" style="flex:0 0 40%">
+      <input id="ufVal" placeholder="值">
+      <button class="btn btn-sm" id="ufAdd">添加字段</button>
+    </div>
+  </section>`);
+
+  bodyHTML.push(`<section class="section" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+    <button class="btn" id="editWork">${ICONS.plus} 编辑信息</button>
+    <button class="btn btn-danger" id="deleteWork">删除作品</button>
+  </section>`);
+
+  body.innerHTML = bodyHTML.join("");
+
+  /* 事件绑定 */
+  el("#drawerClose").onclick = closeDrawer;
+  const range = el("#ratingRange");
+  range.oninput = () => { S.drawerRating = parseFloat(range.value); el("#ratingNum").textContent = fmtScore(S.drawerRating); };
+  el("#ratingSave").onclick = async () => {
+    const r = await api(`/api/works/${w.id}/rating`, { method: "POST", body: { score: S.drawerRating, reason: el("#ratingReason").value } });
+    if (!r.ok) return toast(r.error || "保存失败", true);
+    applyWork(r.work); toast("评分已记录");
+    S.drawerRating = r.work.rating; renderDrawer(); renderWall(); renderStats();
+  };
+  el("#expAdd").onclick = async () => {
+    const body = { date: el("#expDate").value, status: el("#expStatus").value, content: el("#expText").value };
+    const r = await api(`/api/works/${w.id}/experience`, { method: "POST", body });
+    if (!r.ok) return toast(r.error || "添加失败", true);
+    applyWork(r.work); toast("经历已添加"); renderDrawer(); renderWall(); renderStats();
+  };
+  elAll(".tl-del", body).forEach(b => b.onclick = async (ev) => {
+    ev.stopPropagation();
+    const r = await api(`/api/works/${w.id}/experience/${b.dataset.del}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "删除失败", true);
+    applyWork(r.work); renderDrawer(); renderWall();
+  });
+  elAll("[data-open-series]", body).forEach(b => b.onclick = () => openSeries(b.dataset.openSeries));
+  elAll("[data-unlink]", body).forEach(b => b.onclick = async () => {
+    const r = await api(`/api/series/${b.dataset.unlink}/members/${w.id}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "移出失败", true);
+    await reloadAll(); renderDrawer(); toast("已移出系列");
+  });
+  el("#linkSeriesAdd").onclick = async () => {
+    const sid = el("#linkSeries").value;
+    if (!sid) return toast("还没有可加入的系列，先点「新建系列」", true);
+    const r = await api(`/api/series/${sid}/members`, { method: "POST", body: { workIds: [w.id], role: el("#linkRole").value } });
+    if (!r.ok) return toast(r.error || "加入失败", true);
+    await reloadAll(); renderDrawer(); toast("已加入系列");
+  };
+  el("#newSeriesForWork").onclick = () => openSeriesModal({ attachTo: w.id });
+  const ex = el("#expandInfo");  if (ex) ex.onclick = () => { const m = el("#infoboxMore"); const open = m.style.display !== "none"; m.style.display = open ? "none" : "block"; ex.textContent = open ? `展开全部 ${infobox.length} 项` : "收起"; };
+  el("#ufAdd").onclick = async () => {
+    const k = el("#ufKey").value.trim(), v = el("#ufVal").value.trim();
+    if (!k || !v) return toast("字段名和值都要填", true);
+    const fields = (w.userFields || []).concat([{ key: k, value: v }]);
+    const r = await api(`/api/works/${w.id}`, { method: "PATCH", body: { userFields: fields } });
+    if (!r.ok) return toast(r.error || "添加失败", true);
+    applyWork(r.work); renderDrawer(); toast("字段已添加");
+  };
+  el("#editWork").onclick = () => openEdit(w);
+  el("#deleteWork").onclick = async () => {
+    if (!confirm(`确定删除《${w.title}》？该作品的评分与经历记录会一起删除。`)) return;
+    const r = await api(`/api/works/${w.id}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "删除失败", true);
+    S.works = S.works.filter(x => x.id !== w.id);
+    closeDrawer(); renderWall(); renderTabs(); renderStats(); toast("已删除");
+  };
+}
+
+function renderSeriesDrawer() {
+  const s = seriesById(S.currentSeriesId);
+  if (!s) return;
+  const hist = s.ratingHistory || [];
+  const exps = (s.experiences || []).slice().sort((a, b) =>
+    (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const coverSrc = s.coverUrl || (s.members.find(m => m.coverUrl) || {}).coverUrl || "";
+  el("#drawerHead").innerHTML = `
+    <div class="drawer-cover${coverSrc ? " has-cover" : ""}">
+      <div class="cover-fallback"><span>系列</span></div>
+      ${coverSrc ? `<img src="${esc(coverSrc)}" alt="">` : ""}
+    </div>
+    <div style="min-width:0;flex:1">
+      <h2 class="drawer-title">${esc(s.name)}</h2>
+      <div class="drawer-sub">${esc([s.kindLabel, s.yearRange, s.memberCount ? `${s.memberCount} 部作品` : "空系列",
+        ...(s.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
+      <div class="drawer-tags">
+        <span class="pill" data-status="${s.baseStatus}">${esc(s.baseStatusLabel)}</span>
+        ${(s.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
+      </div>
+    </div>
+    <button class="icon-btn drawer-close" id="drawerClose" title="关闭">${ICONS.close}</button>`;
+
+  const body = el("#drawerBody");
+  const html = [];
+  const pct = s.memberCount ? Math.round((s.completedCount / s.memberCount) * 100) : 0;
+
+  /* 概览 */
+  html.push(`<section class="section">
+    <div class="section-head"><h3>系列概览</h3><div class="line"></div></div>
+    <div class="prog"><div class="prog-bar" style="width:${pct}%"></div><span>已完成 ${esc(s.progress)}</span></div>
+    <div class="field-grid" style="margin-top:12px">
+      ${kvHTML("成员", String(s.memberCount))}
+      ${kvHTML("已完成", String(s.completedCount))}
+      ${kvHTML("进行中", String(s.activeCount))}
+      ${kvHTML("系列均分", s.avgRating != null ? `${fmtScore(s.avgRating)}（${s.ratedCount}/${s.memberCount}）` : "成员都没评分")}
+      ${s.yearRange ? kvHTML("年代", s.yearRange) : ""}
+      ${s.catMix.length ? kvHTML("分类分布", s.catMix.map(c => `${c.label} ${c.count}`).join(" · "), true) : ""}
+    </div>
+    ${s.summary ? `<div class="series-summary">${esc(s.summary)}</div>` : `<div class="muted-note" style="margin-top:10px">还没有系列简介。只写“这个系列是什么”，单部剧情留到各作品里。</div>`}
+  </section>`);
+
+  /* 系列评分 */
+  html.push(`<section class="section">
+    <div class="section-head"><h3>系列评分</h3><div class="line"></div><span class="hint">独立于成员评分</span></div>
+    <div class="rating-top">
+      <div class="rating-big ${s.rating == null ? "none" : ""}">${s.rating == null ? "未评分" : fmtScore(s.rating)}</div>
+      <div class="rating-meta">${hist.length ? `共修改 ${hist.length} 次` : "还没有系列评分"}<br>10 分制，0.5 步进</div>
+    </div>
+    <div class="rating-controls">
+      <input type="range" id="sRatingRange" min="0" max="10" step="0.5" value="${S.seriesRating}">
+      <div class="score-num" id="sRatingNum">${fmtScore(S.seriesRating)}</div>
+    </div>
+    <div class="rating-controls">
+      <input class="reason" id="sRatingReason" placeholder="本次修改原因（可选）">
+      <button class="btn btn-primary btn-sm" id="sRatingSave">记录评分</button>
+    </div>
+    ${sparkline(hist)}
+    ${hist.length ? `<div class="history">${hist.slice().reverse().map(h => `
+      <div class="history-row">
+        <div class="t">${esc((h.at || "").replace("T", " ").slice(0, 16))}</div>
+        <div class="delta">${h.prev == null ? "初评" : `<span class="${h.score >= h.prev ? "up" : "down"}">${fmtScore(h.prev)} → </span>`}<b>${fmtScore(h.score)}</b></div>
+        <div class="r" title="${esc(h.reason || "")}">${esc(h.reason || "")}</div>
+      </div>`).join("")}</div>` : ""}
+  </section>`);
+
+  /* 成员 */
+  const pickList = S.works.filter(w => !(w.seriesLinks || []).some(l => l.id === s.id));
+  html.push(`<section class="section">
+    <div class="section-head"><h3>成员</h3><div class="line"></div><span class="hint">手动划分，可跨分类</span></div>
+    ${s.members.length ? `<div class="member-list">${s.members.map(m => `
+      <div class="member-row" data-wid="${m.id}">
+        <div class="mr-cover${m.coverUrl ? " has-cover" : ""}">
+          <div class="cover-fallback"><span>${esc(catLabel(m.category))}</span></div>
+          ${m.coverUrl ? `<img src="${esc(m.coverUrl)}" alt="">` : ""}
+        </div>
+        <div class="mr-main">
+          <div class="mr-title">${esc(m.title)}</div>
+          <div class="mr-meta">${esc([catLabel(m.category), m.year, S.seriesRoles[m.role] || m.role].filter(Boolean).join(" · "))}</div>
+        </div>
+        <span class="pill" data-status="${m.status}">${esc(m.statusLabel)}</span>
+        <span class="mr-score ${m.rating == null ? "none" : ""}">${m.rating == null ? "—" : fmtScore(m.rating)}</span>
+        <button class="btn btn-xs" data-msdel="${m.id}">移出</button>
+      </div>`).join("")}</div>` : `<div class="muted-note">还没有成员。从下面选一部已有作品加进来。</div>`}
+    <div class="search-row" style="margin-top:10px">
+      <select id="memberPick">${pickList.map(w => `<option value="${w.id}">${esc(w.title)} · ${esc(catLabel(w.category))}</option>`).join("") || `<option value="">（可选作品为空）</option>`}</select>
+      <select id="memberRole" class="mini">${Object.entries(S.seriesRoles).map(([k, v]) => `<option value="${k}" ${k === "main" ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+      <button class="btn btn-sm" id="memberAdd">添加成员</button>
+    </div>
+  </section>`);
+
+  /* 系列经历 */
+  html.push(`<section class="section">
+    <div class="section-head"><h3>系列经历</h3><div class="line"></div><span class="hint">跨作品的整体记录</span></div>
+    <div class="exp-form">
+      <input type="date" id="sExpDate" value="${new Date().toISOString().slice(0, 10)}">
+      <select id="sExpStatus"><option value="">（不设状态）</option>${Object.entries(GENERIC_STATUS).filter(([k]) => k !== "not_started").map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
+      <textarea id="sExpText" placeholder="如：开始补这个系列 / 先把正传打完（可空）"></textarea>
+      <button class="btn btn-sm" id="sExpAdd">添加</button>
+    </div>
+    ${exps.length ? `<div class="timeline">${exps.map(e => `
+      <div class="tl-item" ${e.status ? `data-status="${e.status}"` : ""}>
+        <div class="tl-head">
+          <span class="d">${esc(e.date || "")}</span>
+          ${e.status ? `<span class="pill" data-status="${e.status}">${esc(genericLabel(e.status))}</span>` : ""}
+          <button class="tl-del" data-sdel="${e.id}">删除</button>
+        </div>
+        ${e.content ? `<div class="tl-body">${esc(e.content)}</div>` : ""}
+      </div>`).join("")}</div>` : `<div class="muted-note">还没有系列级经历。</div>`}
+  </section>`);
+
+  /* 系列信息 */
+  html.push(`<section class="section">
+    <div class="section-head"><h3>系列信息</h3><div class="line"></div></div>
+    <div class="form-grid">
+      <div class="form-item"><label>名称</label><input id="sName" value="${esc(s.name)}"></div>
+      <div class="form-item"><label>原名</label><input id="sOrig" value="${esc(s.originalTitle || "")}"></div>
+      <div class="form-item"><label>系列类型</label><select id="sKind">${Object.entries(S.seriesKinds).map(([k, v]) => `<option value="${k}" ${s.kind === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+      <div class="form-item"><label>标签（逗号分隔）</label><input id="sTags" value="${esc((s.tags || []).join("，"))}"></div>
+      <div class="form-item full"><label>代表图 URL（可留空，自动用成员封面）</label><input id="sCover" value="" placeholder="粘贴主视觉 / Logo 图片 URL"></div>
+      <div class="form-item full"><label>系列简介</label><textarea id="sSummary" style="min-height:90px">${esc(s.summary || "")}</textarea></div>
+      <div class="form-item full"><label>备注</label><input id="sNote" value="${esc(s.note || "")}"></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <button class="btn btn-primary btn-sm" id="sSave">保存系列信息</button>
+      <button class="btn btn-danger btn-sm" id="sDelete">删除系列</button>
+    </div>
+  </section>`);
+
+  body.innerHTML = html.join("");
+
+  el("#drawerClose").onclick = closeDrawer;
+  const rng = el("#sRatingRange");
+  rng.oninput = () => { S.seriesRating = parseFloat(rng.value); el("#sRatingNum").textContent = fmtScore(S.seriesRating); };
+  el("#sRatingSave").onclick = async () => {
+    const r = await api(`/api/series/${s.id}/rating`, { method: "POST", body: { score: S.seriesRating, reason: el("#sRatingReason").value } });
+    if (!r.ok) return toast(r.error || "保存失败", true);
+    replaceSeries(r.series); S.seriesRating = r.series.rating;
+    renderDrawer(); renderWall(); toast("评分已记录");
+  };
+  elAll(".member-row", body).forEach(row => row.onclick = (ev) => {
+    if (ev.target.closest("[data-msdel]")) return;
+    openDrawer(row.dataset.wid);
+  });
+  elAll("[data-msdel]", body).forEach(b => b.onclick = async (ev) => {
+    ev.stopPropagation();
+    const r = await api(`/api/series/${s.id}/members/${b.dataset.msdel}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "移出失败", true);
+    await reloadAll(); renderDrawer(); toast("已移出");
+  });
+  el("#memberAdd").onclick = async () => {
+    const wid = el("#memberPick").value;
+    if (!wid) return toast("没有可添加的作品", true);
+    const r = await api(`/api/series/${s.id}/members`, { method: "POST", body: { workIds: [wid], role: el("#memberRole").value } });
+    if (!r.ok) return toast(r.error || "添加失败", true);
+    await reloadAll(); renderDrawer(); toast("成员已添加");
+  };
+  el("#sExpAdd").onclick = async () => {
+    const body2 = { date: el("#sExpDate").value, status: el("#sExpStatus").value, content: el("#sExpText").value };
+    const r = await api(`/api/series/${s.id}/experience`, { method: "POST", body: body2 });
+    if (!r.ok) return toast(r.error || "添加失败", true);
+    await reloadAll(); renderDrawer(); toast("经历已添加");
+  };
+  elAll("[data-sdel]", body).forEach(b => b.onclick = async () => {
+    const r = await api(`/api/series/${s.id}/experience/${b.dataset.sdel}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "删除失败", true);
+    await reloadAll(); renderDrawer();
+  });
+  el("#sSave").onclick = async () => {
+    const payload = {
+      name: el("#sName").value.trim(), originalTitle: el("#sOrig").value.trim(),
+      kind: el("#sKind").value, summary: el("#sSummary").value.trim(),
+      tags: el("#sTags").value.split(/[，,]/).map(x => x.trim()).filter(Boolean),
+      note: el("#sNote").value.trim(),
+    };
+    const cov = el("#sCover").value.trim();
+    if (cov) payload.cover = cov;
+    if (!payload.name) return toast("系列名称不能为空", true);
+    const r = await api(`/api/series/${s.id}`, { method: "PATCH", body: payload });
+    if (!r.ok) return toast(r.error || "保存失败", true);
+    replaceSeries(r.series); await reloadAll(); renderDrawer(); toast("已保存");
+  };
+  el("#sDelete").onclick = async () => {
+    if (!confirm(`删除系列《${s.name}》？成员作品不会被删，只会解除归属。`)) return;
+    const r = await api(`/api/series/${s.id}`, { method: "DELETE" });
+    if (!r.ok) return toast(r.error || "删除失败", true);
+    await reloadAll(); closeDrawer(); toast("系列已删除");
+  };
+}
+
+function replaceSeries(s) {
+  const i = S.series.findIndex(x => x.id === s.id);
+  if (i >= 0) S.series[i] = s; else S.series.push(s);
+}
+
+/* ------------------------------------------------------------ 新建系列 */
+function openSeriesModal(opts = {}) {
+  S.seriesDraft = { mode: "create", attachTo: opts.attachTo || null };
+  el("#seriesModalTitle").textContent = "新建系列";
+  el("#seriesBody").innerHTML = `
+    <div class="form-grid">
+      <div class="form-item"><label>系列名称</label><input id="nsName" placeholder="例如 弹丸论破"></div>
+      <div class="form-item"><label>原名</label><input id="nsOrig" placeholder="例如 ダンガンロンパ"></div>
+      <div class="form-item"><label>系列类型</label><select id="nsKind">${Object.entries(S.seriesKinds).map(([k, v]) => `<option value="${k}" ${k === "mixed" ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+      <div class="form-item"><label>标签（逗号分隔）</label><input id="nsTags" placeholder="如 悬疑，推理"></div>
+      <div class="form-item full"><label>系列简介（只写系列是什么，不写单部剧情）</label><textarea id="nsSummary" style="min-height:90px"></textarea></div>
+      <div class="form-item full"><label>代表图 URL（可留空）</label><input id="nsCover" placeholder="主视觉 / Logo 图片地址"></div>
+    </div>
+    <div class="tip">成员是手动添加的：创建后到系列页「添加成员」里挑作品，或在作品详情页「所属系列」里归入。</div>`;
+  el("#seriesSave").textContent = "创建系列";
+  el("#seriesModal").classList.add("show");
+  setTimeout(() => { const n = el("#nsName"); if (n) n.focus(); }, 30);
+}
+
+async function saveSeriesDraft() {
+  const name = (el("#nsName").value || "").trim();
+  if (!name) return toast("系列名称不能为空", true);
+  const payload = {
+    name, originalTitle: (el("#nsOrig").value || "").trim(), kind: el("#nsKind").value,
+    tags: (el("#nsTags").value || "").split(/[，,]/).map(x => x.trim()).filter(Boolean),
+    summary: (el("#nsSummary").value || "").trim(),
+    cover: (el("#nsCover").value || "").trim() || undefined,
+  };
+  const r = await api("/api/series", { method: "POST", body: payload });
+  if (!r.ok) return toast(r.error || "创建失败", true);
+  const attach = S.seriesDraft.attachTo;
+  if (attach) {
+    await api(`/api/series/${r.series.id}/members`, { method: "POST", body: { workIds: [attach], role: "main" } });
+  }
+  el("#seriesModal").classList.remove("show");
+  await reloadAll();
+  openSeries(r.series.id);
+  toast("系列已创建");
+}
+
+function closeSeriesModal() { el("#seriesModal").classList.remove("show"); }
+
+function applyWork(work) {
+  const i = S.works.findIndex(w => w.id === work.id);
+  if (i >= 0) S.works[i] = work; else S.works.push(work);
+}
+
+/* ------------------------------------------------------------ 新增 / 编辑 */
+function openAdd() {
+  S.add = { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null };
+  el("#addModal").classList.add("show");
+  renderAdd();
+}
+function closeAdd() { el("#addModal").classList.remove("show"); }
+
+function openEdit(w) {
+  S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null };
+  el("#addModal").classList.add("show");
+  renderAdd();
+}
+
+function renderAdd() {
+  const a = S.add;
+  el("#addSteps").innerHTML = `<span class="${a.step === 1 ? "on" : ""}">1 分类</span><span class="${a.step === 2 ? "on" : ""}">2 取信息</span><span class="${a.step === 3 ? "on" : ""}">3 填写</span>`;
+  const title = a.mode === "edit" ? "编辑作品" : "添加作品";
+  el("#addTitle").textContent = title;
+  const body = el("#addBody");
+  if (a.step === 1) {
+    body.innerHTML = `<div class="cat-grid">${CAT_ORDER.map(k => {
+      const c = S.categories.find(x => x.key === k) || {};
+      return `<button class="cat-choice" data-cat="${k}"><div class="c-label">${esc(c.label || k)}</div><div class="c-src">${esc((c.sources || []).map(s => S.sourceLabels[s] || s).join(" / "))}</div></button>`;
+    }).join("")}</div>
+    <div class="tip" style="margin-top:14px">选中分类后，下一步可以按来源搜索，也可以直接粘贴 <b>起点 / 番茄 / 刺猬猫 / 豆瓣图书 / Bangumi / Steam</b> 的作品链接，自动填写。</div>`;
+    elAll(".cat-choice", body).forEach(b => b.onclick = () => { a.category = b.dataset.cat; a.source = (S.categories.find(x => x.key === a.category) || {}).sources[0]; a.step = 2; a.items = []; renderAdd(); });
+    el("#addFoot").innerHTML = `<button class="btn btn-ghost" id="addCancel">取消</button><button class="btn" id="addManual">跳过，手动填写</button>`;
+    el("#addCancel").onclick = closeAdd;
+    el("#addManual").onclick = () => { a.draft = { title: "", tags: [], creators: [], infobox: [], userFields: [] }; a.step = 3; renderAdd(); };
+  } else if (a.step === 2) {
+    const cat = S.categories.find(x => x.key === a.category) || {};
+    const sources = cat.sources || ["douban"];
+    body.innerHTML = `
+      <div class="source-row">${sources.map((s, i) => `<button class="source-tab ${a.source === s ? "active" : ""}" data-src="${s}">${esc(S.sourceLabels[s] || s)}${i === 0 ? " · 主" : ""}</button>`).join("")}</div>
+      <div class="search-row">
+        <input id="addKeyword" placeholder="输入作品名，例如 诡秘之主 / 进击的巨人 / 艾尔登法环">
+        <button class="btn btn-primary" id="addSearch">${ICONS.search} 搜索</button>
+      </div>
+      ${a.source === "web" ? `<div class="tip">网文兜底：先用必应定位起点 / 番茄的官方书页，再解析。命中不了就直接粘贴链接。</div>` : ""}
+      <div class="link-row">
+        <input id="addLink" placeholder="或粘贴作品链接：qidian.com/book/… / fanqienovel.com/page/… / ciweimao.com/book/…">
+        <button class="btn" id="parseLink">解析</button>
+      </div>
+      <div class="results" id="addResults"></div>`;
+    elAll(".source-tab", body).forEach(b => b.onclick = () => { a.source = b.dataset.src; a.items = []; renderAdd(); });
+    el("#addSearch").onclick = doSearch;
+    el("#addKeyword").onkeydown = e => { if (e.key === "Enter") doSearch(); };
+    el("#parseLink").onclick = doParseLink;
+    el("#addLink").onkeydown = e => { if (e.key === "Enter") doParseLink(); };
+    renderResults();
+    el("#addFoot").innerHTML = `<button class="btn btn-ghost" id="addBack">${ICONS.back} 上一步</button><button class="btn" id="addManual">跳过，手动填写</button>`;
+    el("#addBack").onclick = () => { a.step = 1; renderAdd(); };
+    el("#addManual").onclick = () => { a.draft = { title: "", tags: [], creators: [], infobox: [], userFields: [] }; a.step = 3; renderAdd(); };
+  } else {
+    renderForm();
+  }
+}
+
+function renderResults() {
+  const a = S.add;
+  const box = el("#addResults");
+  if (!box) return;
+  if (!a.items.length) { box.innerHTML = `<div class="muted-note" style="padding:10px 2px">搜索结果会显示在这里。</div>`; return; }
+  box.innerHTML = a.items.map((it, i) => `
+    <div class="result" data-i="${i}">
+      <div class="result-cover">${it.cover ? `<img src="${esc(it.cover)}" loading="lazy" onerror="this.style.display='none'">` : ""}</div>
+      <div class="result-main">
+        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:#6c7580;font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
+        <div class="result-meta">${esc([it.meta, it.year].filter(Boolean).join(" · "))}${it.coverMissing ? " · 该来源无封面" : ""}</div>
+      </div>
+    </div>`).join("");
+  elAll(".result", box).forEach(r => r.onclick = () => pickItem(Number(r.dataset.i)));
+}
+
+async function doSearch() {
+  const a = S.add;
+  const kw = (el("#addKeyword").value || "").trim();
+  if (!kw) return toast("请输入关键词", true);
+  const btn = el("#addSearch");
+  btn.disabled = true; btn.textContent = "搜索中…";
+  const r = await api("/api/search", { method: "POST", body: { category: a.category, source: a.source, keyword: kw } });
+  btn.disabled = false; btn.innerHTML = `${ICONS.search} 搜索`;
+  if (!r.ok) return toast(r.error || "搜索失败", true);
+  a.items = r.items || [];
+  renderResults();
+  if (!a.items.length) toast("这个来源没搜到，换个来源或粘贴链接试试");
+}
+
+async function pickItem(i) {
+  const a = S.add;
+  const it = a.items[i];
+  if (!it) return;
+  if (it.draft) { a.draft = it.draft; a.step = 3; return renderAdd(); }
+  toast("正在读取条目详情…");
+  const r = await api("/api/resolve", { method: "POST", body: { source: (it.ref || {}).source || a.source, ref: it.ref, category: a.category } });
+  if (!r.ok || !r.draft) return toast(r.error || "读取失败", true);
+  a.draft = r.draft; a.step = 3; renderAdd();
+}
+
+async function doParseLink() {
+  const url = (el("#addLink").value || "").trim();
+  if (!url) return toast("请粘贴链接", true);
+  const btn = el("#parseLink"); btn.disabled = true; btn.textContent = "解析中…";
+  const r = await api("/api/link", { method: "POST", body: { url, category: S.add.category } });
+  btn.disabled = false; btn.textContent = "解析";
+  if (!r.ok || !r.draft) return toast(r.error || "解析失败", true);
+  S.add.draft = r.draft; S.add.step = 3; renderAdd();
+}
+
+function renderForm() {
+  const a = S.add;
+  const d = a.draft || {};
+  const body = el("#addBody");
+  const cat = a.category;
+  const infoboxKeys = (d.infobox || []).map(i => i.key);
+  const gaps = (EXPECT_FIELDS[cat] || []).filter(k => !infoboxKeys.includes(k));
+  const rfSources = (S.categories.find(c => c.key === cat) || {}).sources || [];
+  const rfCur = rfSources.includes(a.refSource) ? a.refSource : (rfSources[0] || "");
+  body.innerHTML = `
+    <div class="cover-preview" style="margin-bottom:16px">
+      <div class="cp-box">${d.coverUrl ? `<img id="cpImg" src="${esc(d.coverUrl)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
+      <div class="cp-info">
+        <div>封面来自：${esc((d.source && (d.source.label || d.source.name)) || "手动")}</div>
+        <div>${d.coverUrl ? "保存时会下载到本地，断网也能显示" : "没有封面，卡片会显示分类占位图"}</div>
+        <div style="margin-top:6px"><input id="coverUrlInput" class="reason" style="width:100%" placeholder="可粘贴封面图片 URL 替换" value=""></div>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-item"><label>标题</label><input id="fTitle" value="${esc(d.title || "")}"></div>
+      <div class="form-item"><label>原名 / 原名副标</label><input id="fOriginal" value="${esc(d.originalTitle || "")}"></div>
+      <div class="form-item"><label>年份</label><input id="fYear" value="${esc(d.year || "")}"></div>
+      <div class="form-item"><label>标签（逗号分隔）</label><input id="fTags" value="${esc((d.tags || []).join("，"))}"></div>
+      <div class="form-item full"><label>创作者（角色：名字，句号分隔）</label><input id="fCreators" value="${esc((d.creators || []).map(c => c.role + "：" + c.name).join("；"))}"></div>
+      <div class="form-item full"><label>简介</label><textarea id="fSummary" style="min-height:110px">${esc(d.summary || "")}</textarea></div>
+      ${a.mode === "create" ? `
+      <div class="form-item"><label>初始评分（可留空）</label>
+        <div class="rating-controls" style="margin:0">
+          <input type="range" id="fRating" min="0" max="10" step="0.5" value="${d.ratingRef != null ? Math.round(d.ratingRef * 2) / 2 : 8}">
+          <div class="score-num" id="fRatingNum">${fmtScore(d.ratingRef != null ? Math.round(d.ratingRef * 2) / 2 : 8)}</div>
+        </div>
+      </div>
+      <div class="form-item"><label>第一条经历状态</label>
+        <select id="fFirstStatus">${Object.entries((S.categories.find(c => c.key === cat) || {}).statuses || GENERIC_STATUS)
+          .filter(([k]) => k !== "not_started").map(([k, v]) => `<option value="${k}" ${k === "active" ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+      </div>
+      <div class="form-item full"><label>第一条经历内容（可留空）</label><input id="fFirstContent" placeholder="如：开始看了 / 刚买 / 朋友推荐"></div>` : ""}
+      </div>
+    ${a.mode === "edit" ? `
+    <div class="refill-box">
+      <div class="refill-head">
+        <h4>重新获取作品信息</h4>
+        <span class="hint">覆盖标题 / 原名 / 年份 / 标签 / 简介 / 来源字段 / 封面；评分、经历、我的字段保留</span>
+      </div>
+      <div class="source-row" id="rfSources">${rfSources.map(s =>
+        `<button class="source-tab ${rfCur === s ? "active" : ""}" data-rfsrc="${s}">${esc(S.sourceLabels[s] || s)}</button>`).join("")}</div>
+      <div class="search-row">
+        <input id="rfKeyword" value="${esc(d.title || "")}" placeholder="用标题搜索该来源">
+        <button class="btn btn-primary" id="rfSearch">${ICONS.search} 搜索</button>
+      </div>
+      <div class="link-row">
+        <input id="rfLink" placeholder="或粘贴作品链接：起点 / 番茄 / 豆瓣图书 / Bangumi / Steam">
+        <button class="btn" id="rfParse">解析</button>
+      </div>
+      <div class="results" id="rfResults"></div>
+    </div>` : ""}
+    ${gaps.length ? `<div class="tip">这个分类的常见字段还缺：<div class="gap-list">${gaps.map(g => `<span class="gap-chip">${esc(g)}</span>`).join("")}</div>保存后可点「编辑信息」或用「我的字段」补上，不影响使用。</div>` : ""}
+    ${(d.infobox || []).length ? `<div class="tip">已抓到 ${d.infobox.length} 项来源字段，会在详情页的「来源详情」里展示。</div>` : ""}`;
+
+  if (a.mode === "create") {
+    const rg = el("#fRating");
+    rg.oninput = () => el("#fRatingNum").textContent = fmtScore(parseFloat(rg.value));
+  }
+  el("#addFoot").innerHTML = a.mode === "edit"
+    ? `<button class="btn btn-ghost" id="addCancel">取消</button><button class="btn btn-primary" id="saveWork">保存修改</button>`
+    : `<button class="btn btn-ghost" id="addBack2">${ICONS.back} 重新搜索</button><button class="btn btn-primary" id="saveWork">保存入库</button>`;
+  const cancelBtn = el("#addCancel"); if (cancelBtn) cancelBtn.onclick = closeAdd;
+  const b2 = el("#addBack2"); if (b2) b2.onclick = () => { a.step = 2; renderAdd(); };
+  el("#saveWork").onclick = saveWork;
+  if (a.mode === "edit") {
+    elAll("[data-rfsrc]", body).forEach(x => x.onclick = () => {
+      a.refSource = x.dataset.rfsrc;
+      elAll("#rfSources .source-tab").forEach(t => t.classList.toggle("active", t === x));
+    });
+    el("#rfSearch").onclick = doRefillSearch;
+    el("#rfParse").onclick = doRefillParse;
+    el("#rfKeyword").onkeydown = ev => { if (ev.key === "Enter") doRefillSearch(); };
+    el("#rfLink").onkeydown = ev => { if (ev.key === "Enter") doRefillParse(); };
+    renderRefillResults();
+  }
+}
+
+/* 重新获取作品信息：只更新元数据，保留个人记录 */
+async function doRefillSearch() {
+  const a = S.add;
+  const kw = (el("#rfKeyword").value || "").trim();
+  if (!kw) return toast("请输入关键词", true);
+  const src = a.refSource || ((S.categories.find(c => c.key === a.category) || {}).sources || [])[0];
+  const list = (S.categories.find(c => c.key === a.category) || {}).sources || [];
+  const useSrc = list.includes(src) ? src : list[0];
+  const btn = el("#rfSearch");
+  btn.disabled = true; btn.textContent = "搜索中…";
+  const r = await api("/api/search", { method: "POST", body: { category: a.category, source: useSrc, keyword: kw } });
+  btn.disabled = false; btn.innerHTML = `${ICONS.search} 搜索`;
+  if (!r.ok) return toast(r.error || "搜索失败", true);
+  a.refSource = useSrc;
+  a.refItems = r.items || [];
+  renderRefillResults();
+  if (!a.refItems.length) toast("这个来源没搜到，换个来源或粘贴链接");
+}
+
+function renderRefillResults() {
+  const box = el("#rfResults");
+  if (!box) return;
+  const items = S.add.refItems || [];
+  if (!items.length) {
+    box.innerHTML = `<div class="muted-note" style="padding:6px 2px">搜到的条目会列在这里，点一条就把信息填进这份记录。</div>`;
+    return;
+  }
+  box.innerHTML = items.map((it, i) => `
+    <div class="result" data-rfi="${i}">
+      <div class="result-cover">${it.cover ? `<img src="${esc(it.cover)}" loading="lazy" onerror="this.style.display='none'">` : ""}</div>
+      <div class="result-main">
+        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:#6c7580;font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
+        <div class="result-meta">${esc([it.meta, it.year].filter(Boolean).join(" · "))}${it.coverMissing ? " · 该来源无封面" : ""}</div>
+      </div>
+      <span class="refill-tag">用这条更新</span>
+    </div>`).join("");
+  elAll("[data-rfi]", box).forEach(r => r.onclick = () => pickRefill(Number(r.dataset.rfi)));
+}
+
+async function pickRefill(i) {
+  const a = S.add;
+  const it = (a.refItems || [])[i];
+  if (!it) return;
+  let draft = it.draft;
+  if (!draft) {
+    toast("正在读取条目详情…");
+    const r = await api("/api/resolve", { method: "POST", body: { source: (it.ref || {}).source || a.refSource, ref: it.ref, category: a.category } });
+    if (!r.ok || !r.draft) return toast(r.error || "读取失败", true);
+    draft = r.draft;
+  }
+  await applyRefill(draft);
+}
+
+async function doRefillParse() {
+  const url = (el("#rfLink").value || "").trim();
+  if (!url) return toast("请粘贴链接", true);
+  const btn = el("#rfParse");
+  btn.disabled = true; btn.textContent = "解析中…";
+  const r = await api("/api/link", { method: "POST", body: { url, category: S.add.category } });
+  btn.disabled = false; btn.textContent = "解析";
+  if (!r.ok || !r.draft) return toast(r.error || "解析失败", true);
+  await applyRefill(r.draft);
+}
+
+async function applyRefill(draft) {
+  const a = S.add;
+  if (a.mode !== "edit" || !a.editId) return;
+  const r = await api(`/api/works/${a.editId}/refill`, { method: "POST", body: { draft } });
+  if (!r.ok) return toast(r.error || "更新失败", true);
+  applyWork(r.work);
+  a.draft = JSON.parse(JSON.stringify(r.work));
+  a.refItems = [];
+  renderWall(); renderStats(); renderAdd();
+  toast(`信息已更新；保留评分 ${r.kept.rating == null ? "未评" : fmtScore(r.kept.rating)}、经历 ${r.kept.experiences} 条`);
+}
+
+async function saveWork() {
+  const a = S.add;
+  const title = el("#fTitle").value.trim();
+  if (!title) return toast("标题不能为空", true);
+  const creatorsRaw = el("#fCreators").value.trim();
+  const creators = creatorsRaw ? creatorsRaw.split(/[；;]/).map(p => {
+    const m = p.split(/[：:]/);
+    return m.length > 1 ? { role: m[0].trim(), name: m.slice(1).join(":").trim() } : { role: "创作者", name: p.trim() };
+  }) : [];
+  const draft = Object.assign({}, a.draft, {
+    title,
+    originalTitle: el("#fOriginal").value.trim(),
+    year: el("#fYear").value.trim(),
+    tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
+    summary: el("#fSummary").value.trim(),
+    creators,
+  });
+  const coverInput = el("#coverUrlInput");
+  if (coverInput && coverInput.value.trim()) {
+    draft.coverUrl = coverInput.value.trim();
+    draft.coverReferer = "";
+  }
+  if (a.mode === "edit") {
+    const payload = { title: draft.title, originalTitle: draft.originalTitle, year: draft.year, tags: draft.tags, summary: draft.summary, creators: draft.creators };
+    if (coverInput && coverInput.value.trim()) payload.cover = coverInput.value.trim();
+    const r = await api(`/api/works/${a.editId}`, { method: "PATCH", body: payload });
+    if (!r.ok) return toast(r.error || "保存失败", true);
+    applyWork(r.work); closeAdd(); renderDrawer(); renderWall(); toast("已保存");
+    return;
+  }
+  const body = { category: a.category, draft };
+  const rEl = el("#fRating");
+  if (rEl) {
+    const v = parseFloat(rEl.value);
+    if (!isNaN(v)) body.draft.rating = v;
+  }
+  const st = el("#fFirstStatus");
+  if (st) body.draft.firstExperience = { status: st.value, content: (el("#fFirstContent") || {}).value || "" };
+  const btn = el("#saveWork"); btn.disabled = true; btn.textContent = "保存中…";
+  const r = await api("/api/works", { method: "POST", body });
+  btn.disabled = false;
+  if (!r.ok) return toast(r.error || "保存失败", true);
+  applyWork(r.work);
+  closeAdd(); renderTabs(); renderWall(); renderStats(); toast("已入库");
+  openDrawer(r.work.id);
+}
+
+/* ------------------------------------------------------------ 设置 / 备份 */
+function openSettings() {
+  const st = S.settings || {};
+  el("#settingsBody").innerHTML = `
+    <div class="section-head"><h3>外观</h3><div class="line"></div></div>
+    <div class="option-line">
+      <span class="opt-label">明暗</span>
+      <div class="seg" id="setModeSeg"><button data-v="dark">深色</button><button data-v="light">浅色</button></div>
+    </div>
+    <div class="option-line" style="margin-bottom:16px">
+      <span class="opt-label">主题</span>
+      <div class="seg" id="setThemeSeg"><button data-v="stage">展厅（默认）</button><button data-v="shelf">书架</button></div>
+    </div>
+    <div class="form-item" style="margin-bottom:14px">
+      <label>代理设置（Bangumi、AniList 需要）</label>
+      <div class="search-row" style="margin:0">
+        <input id="setProxy" value="${esc(st.proxy || "auto")}" placeholder="auto / direct / http://127.0.0.1:7897">
+        <button class="btn btn-sm" id="checkProxy">检查代理</button>
+      </div>
+      <div class="tip" id="proxyState">auto = 自动探测本机常见代理端口；当前：${esc(window.__proxy || "未知")}</div>
+    </div>
+    <div class="form-item" style="margin-bottom:14px">
+      <label>自动备份保留份数</label>
+      <input id="setKeep" type="number" min="5" max="200" value="${esc(st.backup_keep || 30)}">
+    </div>
+    <div class="form-item" style="margin-bottom:14px">
+      <label>DeepSeek API Key（预留，暂未启用）</label>
+      <input id="setDeepseek" value="${esc(st.deepseek_key || "")}" placeholder="留空即可，不产生费用">
+    </div>
+    <div class="section-head" style="margin-top:20px"><h3>导出与恢复</h3><div class="line"></div></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" id="expJson">导出 JSON</button>
+      <button class="btn" id="expZip">导出含封面 zip</button>
+      <label class="btn" style="cursor:pointer">导入备份<input type="file" id="impFile" accept=".json,.zip,application/json,application/zip" style="display:none"></label>
+      <select class="mini" id="impMode"><option value="merge">合并</option><option value="replace">覆盖</option></select>
+    </div>
+    <div class="section-head" style="margin-top:22px"><h3>导入旧记录</h3><div class="line"></div></div>
+    <div class="tip">表头：标题 / 分类 / 原名 / 年份 / 评分 / 标签 / 简介 / 经历日期 / 经历状态 / 经历内容。同一标题写多行 = 同一部作品的多条经历；只导入条目和时间，作品信息之后再逐个「重新获取」。也支持 JSON。</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+      <a class="btn" href="/api/template.csv">下载 CSV 模板</a>
+      <label class="btn" style="cursor:pointer">选择文件<input type="file" id="recFile" accept=".csv,.json,.txt" style="display:none"></label>
+      <button class="btn" id="recPasteBtn">粘贴文本导入</button>
+    </div>
+    <textarea id="recPaste" class="reason" style="display:none;width:100%;min-height:120px;margin-top:10px" placeholder="把 CSV 或 JSON 粘贴到这里"></textarea>
+    <div style="display:none;gap:10px;margin-top:8px" id="recImportRow">
+      <button class="btn btn-primary btn-sm" id="recImport">开始导入</button>
+    </div>
+    <div class="backup-list" id="backupList"></div>
+    <div class="section-head" style="margin-top:22px"><h3>清空数据</h3><div class="line"></div></div>
+    <div class="danger-box">
+      <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
+      <button class="btn btn-danger" id="wipeAll">清空全部数据</button>
+    </div>
+    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.0.0")} · 所有数据只存在这台电脑上</div>`;
+  el("#settingsModal").classList.add("show");
+  applyAppearance(false);
+  el("#setModeSeg").onclick = (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (b) setMode(b.dataset.v);
+  };
+  el("#setThemeSeg").onclick = (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (b) setTheme(b.dataset.v);
+  };
+  el("#wipeAll").onclick = async () => {
+    if (!confirm("会清空全部作品、经历、评分、系列和封面缓存，确定继续？")) return;
+    if (!confirm("再确认一次：清空后只能靠自动备份恢复。继续？")) return;
+    const btn = el("#wipeAll");
+    btn.disabled = true; btn.textContent = "清理中…";
+    const r = await api("/api/clear-data", { method: "POST", body: { confirm: "清空全部" } });
+    btn.disabled = false; btn.textContent = "清空全部数据";
+    if (!r.ok) return toast(r.error || "清空失败", true);
+    await reloadAll();
+    closeSettings();
+    toast(`已清空 ${r.cleared.works} 部作品、${r.cleared.series} 个系列、${r.cleared.covers} 张封面；备份：${r.backup}`);
+  };
+  el("#checkProxy").onclick = async () => {
+    el("#proxyState").textContent = "检查中…";
+    const r = await api("/api/proxy/check", { method: "POST", body: {} });
+    el("#proxyState").textContent = "当前：" + (r.proxy || "未探测到可用代理") + (r.proxy ? "（Bangumi 可用）" : "（Bangumi 会失败，其他源不受影响）");
+  };
+  el("#expJson").onclick = () => location.href = "/api/export";
+  el("#expZip").onclick = () => location.href = "/api/export?covers=1";
+  el("#impFile").onchange = async (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    const mode = el("#impMode").value;
+    if (mode === "replace" && !confirm("覆盖会清空当前全部作品，确定？")) { ev.target.value = ""; return; }
+    const isZip = /\.zip$/i.test(file.name) || /zip/i.test(file.type || "");
+    let body;
+    if (isZip) {
+      const buf = await file.arrayBuffer();
+      body = { zip: bufToBase64(buf), mode };
+    } else {
+      body = { data: await file.text(), mode };
+    }
+    const r = await api("/api/import", { method: "POST", body });
+    ev.target.value = "";
+    if (!r.ok) return toast(r.error || "导入失败", true);
+    toast(`导入完成，当前共 ${r.count} 部` + (r.covers ? `，补回封面 ${r.covers} 张` : ""));
+    const b = await api("/api/bootstrap"); S.works = b.works; renderTabs(); renderWall(); renderStats();
+    loadBackups();
+  };
+  el("#recPasteBtn").onclick = () => {
+    const ta = el("#recPaste");
+    const row = el("#recImportRow");
+    const closed = ta.style.display === "none";
+    ta.style.display = closed ? "block" : "none";
+    row.style.display = closed ? "flex" : "none";
+    if (closed) ta.focus();
+  };
+  el("#recFile").onchange = async (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    const text = await f.text();
+    await doImportRecords(text, f.name);
+    ev.target.value = "";
+  };
+  el("#recImport").onclick = () => doImportRecords(el("#recPaste").value, "粘贴内容");
+  loadBackups();
+}
+
+async function doImportRecords(text, label) {
+  if (!text || !text.trim()) return toast("内容是空的", true);
+  const r = await api("/api/import-records", { method: "POST", body: { text } });
+  if (!r.ok) return toast(r.error || "导入失败", true);
+  toast(`${label}：新增 ${r.created} 部、补充 ${r.updated} 部、写入经历 ${r.experiences} 条`);
+  await reloadAll();
+}
+
+async function loadBackups() {
+  const r = await api("/api/backups");
+  const box = el("#backupList");
+  if (!box) return;
+  S.backups = r.backups || [];
+  if (!S.backups.length) { box.innerHTML = `<div class="muted-note">还没有自动快照，第一次修改后就会生成。</div>`; return; }
+  box.innerHTML = S.backups.map(b => `<div class="backup-row">
+    <span class="b-time">${esc(b.time)}</span>
+    <span>${(b.size / 1024).toFixed(0)} KB</span>
+    <span class="b-size"></span>
+    <button class="btn btn-sm" data-restore="${esc(b.name)}">恢复</button>
+  </div>`).join("");
+  elAll("[data-restore]", box).forEach(x => x.onclick = async () => {
+    if (!confirm("用这个快照覆盖当前数据？")) return;
+    const r2 = await api("/api/backups/restore", { method: "POST", body: { name: x.dataset.restore } });
+    if (!r2.ok) return toast(r2.error || "恢复失败", true);
+    toast("已恢复到该快照");
+    const b = await api("/api/bootstrap"); S.works = b.works; S.settings = b.settings; renderTabs(); renderWall(); renderStats(); renderStatusChips();
+  });
+}
+
+function closeSettings() { el("#settingsModal").classList.remove("show"); }
+
+/* ------------------------------------------------------------ 全局事件 */
+function bindGlobal() {
+  el("#searchInput").oninput = (e) => { S.filters.q = e.target.value; renderWall(); };
+  elAll("#sortSelect").forEach(s => s.onchange = (e) => { S.filters.sort = e.target.value; renderWall(); });
+  elAll("#timeSelect").forEach(s => s.onchange = (e) => { S.filters.time = e.target.value; renderWall(); });
+  el("#addBtn").onclick = openAdd;
+  el("#menuBtn").onclick = openSettings;
+  el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
+  el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
+  elAll("#groupSeg button").forEach(b => b.onclick = () => {
+    S.filters.group = b.dataset.group;
+    elAll("#groupSeg button").forEach(x => x.classList.toggle("on", x === b));
+    renderWall();
+  });
+  el("#newSeriesBtn").onclick = () => openSeriesModal();
+  el("#seriesClose").onclick = closeSeriesModal;
+  el("#seriesCancel").onclick = closeSeriesModal;
+  el("#seriesModal").onclick = (e) => { if (e.target.id === "seriesModal") closeSeriesModal(); };
+  el("#seriesSave").onclick = saveSeriesDraft;
+  el("#backdrop").onclick = closeDrawer;
+  el("#settingsClose").onclick = closeSettings;
+  el("#settingsClose2").onclick = closeSettings;
+  el("#settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") closeSettings(); };
+  el("#saveSettings").onclick = async () => {
+    const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30, deepseek_key: el("#setDeepseek").value.trim() };
+    const r = await api("/api/settings", { method: "POST", body });
+    if (!r.ok) return toast("保存失败", true);
+    S.settings = r.settings; toast("设置已保存"); closeSettings();
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (el("#addModal").classList.contains("show")) closeAdd();
+      else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();
+      else if (el("#settingsModal").classList.contains("show")) closeSettings();
+      else if (S.currentId || S.currentSeriesId) closeDrawer();
+    }
+    if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+      e.preventDefault(); el("#searchInput").focus();
+    }
+  });
+}
+
+applyAppearance(false);
+boot();
