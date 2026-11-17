@@ -19,12 +19,28 @@ const ICONS = {
   back: '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>',
 };
 
+/* 站外搜索：只生成平台搜索入口，不参与解析。
+   关键词占位符固定为 {q}，渲染时统一用 encodeURIComponent 编码。 */
+const EXTERNAL_SEARCH_PLATFORMS = {
+  movie: [
+    { label: "爱奇艺", template: "https://www.iqiyi.com/so/q_{q}" },
+    { label: "腾讯视频", template: "https://v.qq.com/x/search/?q={q}" },
+    { label: "优酷", template: "https://search.youku.com/search_video?keyword={q}" },
+    { label: "哔哩哔哩", template: "https://search.bilibili.com/all?keyword={q}" },
+  ],
+  novel: [
+    { label: "起点中文网", template: "https://www.qidian.com/search?kw={q}" },
+    { label: "番茄小说", template: "https://fanqienovel.com/search/{q}" },
+    { label: "刺猬猫", template: "https://www.ciweimao.com/get-search-book-list/0-0-0-0-0-0/全部/{q}/1" },
+  ],
+};
+
 const S = {
   version: "", works: [], series: [], seriesKinds: {}, seriesRoles: {}, settings: {}, categories: [], sourceLabels: {},
   filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
   currentId: null, currentSeriesId: null,
   drawerRating: 8, seriesRating: 8,
-  add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false },
+  add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null },
   seriesDraft: { mode: "create", attachTo: null },
   backups: [],
 };
@@ -66,9 +82,9 @@ function applyAppearance(save = true) {
     tBtn.innerHTML = THEME_ICON[APPEARANCE.theme] || THEME_ICON.stage;
     tBtn.title = APPEARANCE.theme === "stage" ? "当前展厅主题，点击切书架" : "当前书架主题，点击切展厅";
   }
-  elAll("#setModeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.mode));
-  elAll("#setThemeSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === APPEARANCE.theme));
-  elAll("#sizeSeg button").forEach(b => b.classList.toggle("on", b.dataset.size === APPEARANCE.size));
+  elAll("#setModeSeg button").forEach(b => { const on = b.dataset.v === APPEARANCE.mode; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); });
+  elAll("#setThemeSeg button").forEach(b => { const on = b.dataset.v === APPEARANCE.theme; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); });
+  elAll("#sizeSeg button").forEach(b => { const on = b.dataset.size === APPEARANCE.size; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); });
   applyWallDensity();
 }
 
@@ -96,7 +112,7 @@ function applyWallDensity() {
   wall.style.gridTemplateColumns = "";
   const raw = getComputedStyle(wall).gridTemplateColumns;
   let base = (raw && raw !== "none") ? raw.trim().split(/\s+/).filter(Boolean).length : 0;
-  if (!base) base = Math.max(1, Math.floor((wall.clientWidth + 18) / (136 + 18)));
+  if (!base) base = Math.max(1, Math.floor((wall.clientWidth + 18) / (148 + 18)));
   const factor = APPEARANCE.size === "medium" ? 0.75 : 0.5;
   const cols = Math.max(1, Math.round(base * factor));
   wall.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
@@ -132,6 +148,15 @@ function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function fmtScore(v) { return (v == null || v === "") ? "" : Number(v).toFixed(1); }
+
+function externalSearchUrl(platform, keyword) {
+  return platform.template.replace("{q}", encodeURIComponent(keyword));
+}
+
+function externalSearchLinksHTML(platforms, keyword) {
+  if (!keyword) return "";
+  return platforms.map(p => `<a class="source-tab external-search-link" href="${esc(externalSearchUrl(p, keyword))}" target="_blank" rel="noopener noreferrer" aria-label="在 ${esc(p.label)} 搜索 ${esc(keyword)}">${ICONS.search}<span>${esc(p.label)}</span></a>`).join("");
+}
 
 async function api(path, opts = {}) {
   const o = { headers: { "Content-Type": "application/json" } };
@@ -202,7 +227,7 @@ function renderTabs() {
   S.works.forEach(w => { counts[w.category] = (counts[w.category] || 0) + 1; });
   const tabs = [["all", "全部"]].concat(CAT_ORDER.map(k => [k, catLabel(k)]));
   el("#tabs").innerHTML = tabs.map(([k, label]) =>
-    `<button class="tab ${S.filters.cat === k ? "active" : ""}" data-cat="${k}">${esc(label)}<span class="count">${counts[k] || 0}</span></button>`
+    `<button class="tab ${S.filters.cat === k ? "active" : ""}" data-cat="${k}" aria-pressed="${S.filters.cat === k}">${esc(label)}<span class="count">${counts[k] || 0}</span></button>`
   ).join("");
   elAll("#tabs .tab").forEach(b => b.onclick = () => {
     S.filters.cat = b.dataset.cat;
@@ -217,7 +242,7 @@ function renderStatusChips() {
   const labels = { all: "全部状态" };
   keys.slice(1).forEach(k => labels[k] = cat === "all" ? genericLabel(k) : ((S.categories.find(c => c.key === cat) || {}).statuses || GENERIC_STATUS)[k]);
   el("#statusChips").innerHTML = keys.map(k =>
-    `<button class="chip ${S.filters.status === k ? "active" : ""}" data-status="${k}">${esc(labels[k])}</button>`
+    `<button class="chip ${S.filters.status === k ? "active" : ""}" data-status="${k}" aria-pressed="${S.filters.status === k}">${esc(labels[k])}</button>`
   ).join("");
   elAll("#statusChips .chip").forEach(b => b.onclick = () => {
     S.filters.status = b.dataset.status;
@@ -270,7 +295,7 @@ function cardHTML(w) {
     ? `<img src="${esc(w.coverUrl)}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-cover')">`
     : "";
   const sName = seriesNameOf(w);
-  return `<article class="card" data-id="${w.id}" data-cat="${w.category}">
+  return `<article class="card" data-id="${w.id}" data-cat="${w.category}" tabindex="0" role="button" aria-label="查看《${esc(w.title)}》">
     <div class="card-cover${w.coverUrl ? " has-cover" : ""}">
       <div class="cover-fallback"><span>${esc(catLabel(w.category))}</span></div>
       ${cover}
@@ -296,7 +321,7 @@ function seriesCardHTML(s, list) {
     </div>`).join("");
   const mix = s.catMix.map(c => `${c.label} ${c.count}`).join(" · ");
   const countBadge = s.memberCount ? `<div class="ss-count">${s.memberCount}</div>` : "";
-  return `<article class="series-card" data-sid="${s.id}">
+  return `<article class="series-card" data-sid="${s.id}" tabindex="0" role="button" aria-label="查看系列「${esc(s.name)}」">
     <span class="series-badge">系列</span>
     ${stack.length ? `<div class="series-stack">${covers}${countBadge}</div>`
       : `<div class="series-stack empty"><span class="ss-add">＋</span></div>`}
@@ -343,8 +368,14 @@ function renderWall() {
     el("#wall").innerHTML = list.map(cardHTML).join("");
     el("#wall").className = "wall";
   }
-  elAll("#wall .card").forEach(c => c.onclick = () => openDrawer(c.dataset.id));
-  elAll("#wall .series-card").forEach(c => c.onclick = () => openSeries(c.dataset.sid));
+  elAll("#wall .card").forEach(c => {
+    c.onclick = () => openDrawer(c.dataset.id);
+    c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(c.dataset.id); } };
+  });
+  elAll("#wall .series-card").forEach(c => {
+    c.onclick = () => openSeries(c.dataset.sid);
+    c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSeries(c.dataset.sid); } };
+  });
 }
 
 function renderStats() {
@@ -361,6 +392,24 @@ function renderStats() {
 }
 
 /* ------------------------------------------------------------ 详情抽屉 */
+const overlayFocusStack = [];
+function rememberOverlayFocus() {
+  const a = document.activeElement;
+  if (a && a !== document.body) overlayFocusStack.push(a);
+}
+function restoreOverlayFocus() {
+  const a = overlayFocusStack.pop();
+  if (a && document.contains(a)) a.focus({ preventScroll: true });
+}
+function setDrawerState(open) {
+  const d = el("#drawer"), b = el("#backdrop");
+  if (d) { d.classList.toggle("show", open); d.setAttribute("aria-hidden", open ? "false" : "true"); }
+  if (b) { b.classList.toggle("show", open); b.setAttribute("aria-hidden", open ? "false" : "true"); }
+}
+function focusAfterRender(sel) {
+  requestAnimationFrame(() => { const t = el(sel); if (t) t.focus({ preventScroll: true }); });
+}
+
 function findWork(id) { return S.works.find(w => w.id === id); }
 
 function openDrawer(id) {
@@ -368,26 +417,31 @@ function openDrawer(id) {
   S.currentSeriesId = null;
   const w = findWork(id);
   if (!w) return;
+  const wasOpen = el("#drawer").classList.contains("show");
+  if (!wasOpen) rememberOverlayFocus();
   S.drawerRating = w.rating == null ? 8 : w.rating;
-  el("#backdrop").classList.add("show");
-  el("#drawer").classList.add("show");
+  setDrawerState(true);
   renderDrawer();
+  if (!wasOpen) focusAfterRender("#drawerClose");
 }
 
-function openSeries(sid) {
+function openSeries(sid, keepFocus = false) {
   const s = seriesById(sid);
   if (!s) return;
+  const wasOpen = el("#drawer").classList.contains("show");
+  if (!wasOpen && !keepFocus) rememberOverlayFocus();
   S.currentSeriesId = sid;
   S.currentId = null;
   S.seriesRating = s.rating == null ? 8 : s.rating;
-  el("#backdrop").classList.add("show");
-  el("#drawer").classList.add("show");
+  setDrawerState(true);
   renderDrawer();
+  if (!wasOpen) focusAfterRender("#drawerClose");
 }
 
 function closeDrawer() {
-  el("#backdrop").classList.remove("show");
-  el("#drawer").classList.remove("show");
+  if (!el("#drawer").classList.contains("show")) return;
+  restoreOverlayFocus();
+  setDrawerState(false);
   S.currentId = null;
   S.currentSeriesId = null;
 }
@@ -404,10 +458,10 @@ function sparkline(history) {
   const y = v => H - pad - (Math.max(0, Math.min(10, v)) / 10) * (H - pad * 2);
   let d = "";
   history.forEach((h, i) => { d += `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(h.score).toFixed(1)} `; });
-  const dots = history.map((h, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(h.score).toFixed(1)}" r="2.6" fill="#d3a15f"/>`).join("");
-  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <line x1="${pad}" y1="${y(5)}" x2="${W - pad}" y2="${y(5)}" stroke="#2a333d" stroke-dasharray="3 3"/>
-    <path d="${d}" fill="none" stroke="#d3a15f" stroke-width="1.6" stroke-linejoin="round"/>
+  const dots = history.map((h, i) => `<circle class="spark-dot" cx="${x(i).toFixed(1)}" cy="${y(h.score).toFixed(1)}" r="2.6"/>`).join("");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="评分变化趋势">
+    <line class="spark-base" x1="${pad}" y1="${y(5)}" x2="${W - pad}" y2="${y(5)}"/>
+    <path class="spark-line" d="${d}" fill="none"/>
     ${dots}
   </svg>`;
 }
@@ -428,15 +482,15 @@ function renderDrawer() {
   head.innerHTML = `
     <div class="drawer-cover${w.coverUrl ? " has-cover" : ""}">${cover}</div>
     <div style="min-width:0;flex:1">
-      <h2 class="drawer-title">${esc(w.title)}</h2>
+      <h2 class="drawer-title" id="drawerTitle">${esc(w.title)}</h2>
       <div class="drawer-sub">${esc([catLabel(w.category), w.year, ...(w.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
       <div class="drawer-tags">
         <span class="pill" data-status="${w.status}">${esc(statusLabel(w))}</span>
         ${(w.tags || []).slice(0, 5).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
       </div>
-      ${w.source && w.source.url ? `<div style="margin-top:8px;font-size:11px"><a href="${esc(w.source.url)}" target="_blank" rel="noreferrer" style="color:#8b949e;text-decoration:none;border-bottom:1px dotted #4a5561">${esc(w.source.label || w.source.name)} 条目</a></div>` : ""}
+      ${w.source && w.source.url ? `<div style="margin-top:8px;font-size:11px"><a href="${esc(w.source.url)}" target="_blank" rel="noreferrer" style="color:var(--lenso-tint-text);text-decoration:none;border-bottom:1px dotted var(--lenso-label-tertiary)">${esc(w.source.label || w.source.name)} 条目</a></div>` : ""}
     </div>
-    <button class="icon-btn drawer-close" id="drawerClose" title="关闭">${ICONS.close}</button>`;
+    <button class="icon-btn drawer-close" id="drawerClose" title="关闭" aria-label="关闭详情">${ICONS.close}</button>`;
 
   const body = el("#drawerBody");
   const bodyHTML = [];
@@ -618,7 +672,7 @@ function renderSeriesDrawer() {
       ${coverSrc ? `<img src="${esc(coverSrc)}" alt="">` : ""}
     </div>
     <div style="min-width:0;flex:1">
-      <h2 class="drawer-title">${esc(s.name)}</h2>
+      <h2 class="drawer-title" id="drawerTitle">${esc(s.name)}</h2>
       <div class="drawer-sub">${esc([s.kindLabel, s.yearRange, s.memberCount ? `${s.memberCount} 部作品` : "空系列",
         ...(s.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
       <div class="drawer-tags">
@@ -626,7 +680,7 @@ function renderSeriesDrawer() {
         ${(s.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
       </div>
     </div>
-    <button class="icon-btn drawer-close" id="drawerClose" title="关闭">${ICONS.close}</button>`;
+    <button class="icon-btn drawer-close" id="drawerClose" title="关闭" aria-label="关闭详情">${ICONS.close}</button>`;
 
   const body = el("#drawerBody");
   const html = [];
@@ -676,7 +730,7 @@ function renderSeriesDrawer() {
   html.push(`<section class="section">
     <div class="section-head"><h3>成员</h3><div class="line"></div><span class="hint">手动划分，可跨分类</span></div>
     ${s.members.length ? `<div class="member-list">${s.members.map(m => `
-      <div class="member-row" data-wid="${m.id}">
+      <div class="member-row" data-wid="${m.id}" tabindex="0" role="button" aria-label="查看成员《${esc(m.title)}》">
         <div class="mr-cover${m.coverUrl ? " has-cover" : ""}">
           <div class="cover-fallback"><span>${esc(catLabel(m.category))}</span></div>
           ${m.coverUrl ? `<img src="${esc(m.coverUrl)}" alt="">` : ""}
@@ -745,9 +799,14 @@ function renderSeriesDrawer() {
     replaceSeries(r.series); S.seriesRating = r.series.rating;
     renderDrawer(); renderWall(); toast("评分已记录");
   };
-  elAll(".member-row", body).forEach(row => row.onclick = (ev) => {
-    if (ev.target.closest("[data-msdel]")) return;
-    openDrawer(row.dataset.wid);
+  elAll(".member-row", body).forEach(row => {
+    row.onclick = (ev) => {
+      if (ev.target.closest("[data-msdel]")) return;
+      openDrawer(row.dataset.wid);
+    };
+    row.onkeydown = (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(row.dataset.wid); }
+    };
   });
   elAll("[data-msdel]", body).forEach(b => b.onclick = async (ev) => {
     ev.stopPropagation();
@@ -800,8 +859,28 @@ function replaceSeries(s) {
   if (i >= 0) S.series[i] = s; else S.series.push(s);
 }
 
+/* ------------------------------------------------------------ 浮层状态 */
+function setModalState(selector, open) {
+  const m = el(selector);
+  if (!m) return;
+  m.classList.toggle("show", open);
+  m.setAttribute("aria-hidden", open ? "false" : "true");
+}
+function modalIsOpen(selector) {
+  const m = el(selector);
+  return !!(m && m.classList.contains("show"));
+}
+function activeOverlayRoot() {
+  for (const sel of ["#addModal", "#seriesModal", "#settingsModal"]) {
+    if (modalIsOpen(sel)) return el(`${sel} .modal-box`);
+  }
+  if (el("#drawer") && el("#drawer").classList.contains("show")) return el("#drawer");
+  return null;
+}
+
 /* ------------------------------------------------------------ 新建系列 */
 function openSeriesModal(opts = {}) {
+  if (!modalIsOpen("#seriesModal")) rememberOverlayFocus();
   S.seriesDraft = { mode: "create", attachTo: opts.attachTo || null };
   el("#seriesModalTitle").textContent = "新建系列";
   el("#seriesBody").innerHTML = `
@@ -815,7 +894,7 @@ function openSeriesModal(opts = {}) {
     </div>
     <div class="tip">成员是手动添加的：创建后到系列页「添加成员」里挑作品，或在作品详情页「所属系列」里归入。</div>`;
   el("#seriesSave").textContent = "创建系列";
-  el("#seriesModal").classList.add("show");
+  setModalState("#seriesModal", true);
   setTimeout(() => { const n = el("#nsName"); if (n) n.focus(); }, 30);
 }
 
@@ -834,31 +913,352 @@ async function saveSeriesDraft() {
   if (attach) {
     await api(`/api/series/${r.series.id}/members`, { method: "POST", body: { workIds: [attach], role: "main" } });
   }
-  el("#seriesModal").classList.remove("show");
+  setModalState("#seriesModal", false);
   await reloadAll();
-  openSeries(r.series.id);
+  openSeries(r.series.id, true);
   toast("系列已创建");
 }
 
-function closeSeriesModal() { el("#seriesModal").classList.remove("show"); }
+function closeSeriesModal() {
+  if (!modalIsOpen("#seriesModal")) return;
+  restoreOverlayFocus();
+  setModalState("#seriesModal", false);
+}
 
 function applyWork(work) {
   const i = S.works.findIndex(w => w.id === work.id);
   if (i >= 0) S.works[i] = work; else S.works.push(work);
 }
 
-/* ------------------------------------------------------------ 新增 / 编辑 */
-function openAdd() {
-  S.add = { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null };
-  el("#addModal").classList.add("show");
+/* ------------------------------------------------------------ TMDB 剪贴板导入 */
+function tmdbKindLabel(draft) {
+  return ((draft.source || {}).type === "tv") ? "电视剧" : "电影";
+}
+function tmdbInfoValue(draft, keys) {
+  const info = draft.infobox || [];
+  const lower = keys.map(k => k.toLowerCase());
+  const hit = info.find(i => lower.includes(String(i.key || "").toLowerCase()));
+  return hit ? hit.value : "";
+}
+function tmdbCreatorNames(draft, roles) {
+  const list = draft.creators || [];
+  return list.filter(c => roles.some(r => String(c.role || "").includes(r)))
+    .map(c => c.name).filter(Boolean).join("、");
+}
+function tmdbImportHTML(a) {
+  if (a.category !== "movie") return "";
+  return `
+    <div class="tmdb-import" id="tmdbImportBox">
+      <div class="refill-head">
+        <h4>从 TMDB 粘贴资料</h4>
+        <span class="hint">在 TMDB 详情页点击书签复制 JSON，粘贴到这里先预览；确认后才保存，不覆盖已有非空资料。</span>
+      </div>
+      <div class="tmdb-bookmark-note">
+        <div class="tmdb-bookmark-title"><b>书签：TMDB→项目</b><span>只需安装一次，之后在任意 TMDB 详情页点击即可复制资料。</span></div>
+        <div class="tmdb-bookmark-actions">
+          <button class="btn btn-sm" id="tmdbCopyBookmarklet">复制书签脚本</button>
+          <a class="btn btn-ghost btn-sm tmdb-search-link is-disabled" id="tmdbSearchLink" target="_blank" rel="noopener noreferrer" aria-disabled="true">前往 TMDB 搜索</a>
+          <span class="tmdb-search-hint" id="tmdbSearchHint">当前没有标题，请先在搜索框输入作品标题</span>
+        </div>
+        <div class="tmdb-bookmark-help">Chrome / Edge：右键书签栏 → 添加网页；名称填「TMDB→项目」，网址粘贴刚复制的脚本。之后在 TMDB 详情页点击该书签即可。</div>
+      </div>
+      <textarea id="tmdbJson" class="reason tmdb-json" spellcheck="false" placeholder="在这里粘贴 TMDB 书签生成的 JSON">${esc(a.tmdbRaw || "")}</textarea>
+      <div class="tmdb-actions">
+        <button class="btn btn-primary btn-sm" id="tmdbPreviewBtn">预览资料</button>
+        <button class="btn btn-ghost btn-sm" id="tmdbClearBtn">清空</button>
+        <span class="tmdb-import-note">只读预览；不会直接写入作品库</span>
+      </div>
+      <div class="tmdb-preview" id="tmdbPreview">${a.tmdbPreview ? tmdbPreviewHTML(a) : ""}</div>
+    </div>`;
+}
+
+function tmdbSearchUrl(keyword) {
+  return "https://www.themoviedb.org/search?query=" + encodeURIComponent(keyword);
+}
+
+function currentTmdbTitle(a) {
+  const fTitle = el("#fTitle");
+  const fValue = fTitle ? (fTitle.value || "").trim() : "";
+  if (fValue) return fValue;
+  const rfKeyword = el("#rfKeyword");
+  const rfValue = rfKeyword ? (rfKeyword.value || "").trim() : "";
+  if (rfValue) return rfValue;
+  const addKeyword = el("#addKeyword");
+  const addValue = addKeyword ? (addKeyword.value || "").trim() : "";
+  if (addValue) return addValue;
+  if (a && a.draft && (a.draft.title || "").trim()) return a.draft.title.trim();
+  if (a && a.tmdbPreview && a.tmdbPreview.draft && (a.tmdbPreview.draft.title || "").trim()) {
+    return a.tmdbPreview.draft.title.trim();
+  }
+  return "";
+}
+
+function syncTmdbSearchLink(a) {
+  const link = el("#tmdbSearchLink");
+  const hint = el("#tmdbSearchHint");
+  if (!link || !hint) return;
+  const keyword = currentTmdbTitle(a);
+  if (keyword) {
+    link.href = tmdbSearchUrl(keyword);
+    link.removeAttribute("aria-disabled");
+    link.classList.remove("is-disabled");
+    hint.textContent = "使用当前标题搜索 TMDB，在新标签页打开";
+  } else {
+    link.removeAttribute("href");
+    link.setAttribute("aria-disabled", "true");
+    link.classList.add("is-disabled");
+    hint.textContent = "当前没有标题，请先在搜索框输入作品标题";
+  }
+}
+
+async function copyPlainText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (e) {}
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0";
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) {}
+  document.body.removeChild(area);
+  if (!ok) throw new Error("浏览器拒绝复制");
+}
+
+async function copyTmdbBookmarklet() {
+  const btn = el("#tmdbCopyBookmarklet");
+  if (btn) { btn.disabled = true; btn.textContent = "读取中…"; }
+  try {
+    const res = await fetch("/static/tmdb-bookmarklet.js", { cache: "no-store" });
+    if (!res.ok) throw new Error("读取书签脚本失败");
+    const code = (await res.text()).trim();
+    if (!code) throw new Error("书签脚本为空");
+    await copyPlainText("javascript:" + code);
+    toast("书签脚本已复制。请新建书签「TMDB→项目」，把脚本粘贴到网址栏");
+  } catch (e) {
+    toast("复制书签脚本失败：" + (e && e.message ? e.message : "未知错误"), true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "复制书签脚本"; }
+  }
+}
+
+function tmdbPreviewHTML(a) {
+  const p = a.tmdbPreview;
+  if (!p || !p.draft) return "";
+  const d = p.draft;
+  const kind = tmdbKindLabel(d);
+  const cover = d.previewUrl || d.coverUrl || "";
+  const episodes = tmdbInfoValue(d, ["集数"]);
+  const runtime = tmdbInfoValue(d, ["时长", "片长"]);
+  const directors = tmdbCreatorNames(d, ["导演", "原创", "编剧"]);
+  const actors = tmdbCreatorNames(d, ["主演", "演员"]);
+  const target = p.target;
+  const match = p.match;
+  const isEdit = a.mode === "edit";
+  const actionText = isEdit
+    ? "按保护规则合并到当前作品"
+    : (match ? "使用这份资料（保存时更新已有 TMDB 作品）" : "使用这份资料并继续");
+  const targetText = target ? `当前作品：${target.title || "未命名"}` : "";
+  const matchText = match && !target ? `已有条目：${match.title || "未命名"}${match.year ? `（${match.year}）` : ""}` : "";
+  const warnings = (p.warnings || []).map(w => `<div class="tmdb-warning">${esc(w)}</div>`).join("");
+  const actions = isEdit
+    ? `<button class="btn btn-primary btn-sm" id="tmdbMerge">仅补空字段</button>
+       <button class="btn btn-ghost btn-sm" id="tmdbOverwrite">覆盖 TMDB 字段</button>`
+    : (match
+      ? `<button class="btn btn-primary btn-sm" id="tmdbUse">仅补空字段（更新已有 TMDB 作品）</button>
+         <button class="btn btn-ghost btn-sm" id="tmdbUseOverwrite">覆盖已有 TMDB 作品</button>`
+      : `<button class="btn btn-primary btn-sm" id="tmdbUse">${esc(actionText)}</button>`);
+  const help = isEdit
+    ? `<div class="tmdb-merge-help">「仅补空字段」保留已有非空资料；「覆盖 TMDB 字段」会用 TMDB 的非空标题、原名、年份、标签、简介、演职人员、infobox 和封面替换；评分、经历、系列和用户字段仍保留。</div>`
+    : (match
+      ? `<div class="tmdb-merge-help">保存时会把这份资料写入已有 TMDB 作品；「仅补空字段」保留已有非空资料，「覆盖已有 TMDB 作品」会替换 TMDB 字段，评分、经历、系列和用户字段仍保留。</div>`
+      : "");
+  return `
+    <div class="tmdb-preview-card">
+      <div class="tmdb-preview-cover">${cover ? `<img src="${esc(cover)}" alt="" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>TMDB</span></div>`}</div>
+      <div class="tmdb-preview-main">
+        <div class="tmdb-preview-title">${esc(d.title || "未命名")} <span class="tmdb-kind">${esc(kind)}</span></div>
+        <div class="tmdb-preview-meta">${esc([d.year, `TMDB ${d.source.id}`].filter(Boolean).join(" · "))}${targetText ? ` · ${esc(targetText)}` : ""}${matchText ? ` · ${esc(matchText)}` : ""}</div>
+        ${d.summary ? `<div class="tmdb-preview-summary">${esc(d.summary)}</div>` : `<div class="tmdb-preview-summary muted">没有简介</div>`}
+        <div class="tmdb-preview-facts">
+          ${d.tags && d.tags.length ? `<div><b>标签</b>${esc(d.tags.join("、"))}</div>` : ""}
+          ${directors ? `<div><b>导演 / 原创</b>${esc(directors)}</div>` : ""}
+          ${actors ? `<div><b>主演</b>${esc(actors)}</div>` : ""}
+          ${episodes ? `<div><b>集数</b>${esc(episodes)}</div>` : ""}
+          ${runtime ? `<div><b>片长</b>${esc(runtime)}</div>` : ""}
+        </div>
+        ${warnings}
+        ${help}
+        <div class="tmdb-preview-actions">
+          ${actions}
+          <span class="tmdb-import-note">确认前不会写入任何资料</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindTmdbPreview(a) {
+  const use = el("#tmdbUse");
+  if (use) use.onclick = () => useTmdbDraft("merge");
+  const useOverwrite = el("#tmdbUseOverwrite");
+  if (useOverwrite) useOverwrite.onclick = () => useTmdbDraft("overwrite");
+  const merge = el("#tmdbMerge");
+  if (merge) merge.onclick = () => importTmdbToCurrent("merge");
+  const overwrite = el("#tmdbOverwrite");
+  if (overwrite) overwrite.onclick = () => importTmdbToCurrent("overwrite");
+}
+
+function bindTmdbImport(a) {
+  const box = el("#tmdbImportBox");
+  if (!box) return;
+  const preview = el("#tmdbPreviewBtn");
+  const clear = el("#tmdbClearBtn");
+  const copyBookmark = el("#tmdbCopyBookmarklet");
+  if (preview) preview.onclick = previewTmdb;
+  if (copyBookmark) copyBookmark.onclick = copyTmdbBookmarklet;
+  if (clear) clear.onclick = () => {
+    a.tmdbRaw = "";
+    a.tmdbPreview = null;
+    const input = el("#tmdbJson");
+    if (input) input.value = "";
+    const out = el("#tmdbPreview");
+    if (out) out.innerHTML = "";
+    syncTmdbSearchLink(a);
+  };
+  ["#fTitle", "#rfKeyword", "#addKeyword"].forEach(selector => {
+    const input = el(selector);
+    if (input) input.addEventListener("input", () => syncTmdbSearchLink(a));
+  });
+  syncTmdbSearchLink(a);
+  bindTmdbPreview(a);
+}
+
+async function previewTmdb() {
+  const a = S.add;
+  const raw = (el("#tmdbJson").value || "").trim();
+  if (!raw) return toast("请先粘贴 TMDB JSON", true);
+  const btn = el("#tmdbPreviewBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "校验中…"; }
+  const r = await api("/api/tmdb/preview", {
+    method: "POST",
+    body: { json: raw, targetId: a.mode === "edit" ? a.editId : null },
+  });
+  if (btn) { btn.disabled = false; btn.textContent = "预览资料"; }
+  if (!r.ok) {
+    a.tmdbPreview = null;
+    a.tmdbRaw = "";
+    const out = el("#tmdbPreview");
+    if (out) out.innerHTML = `<div class="tmdb-error">${esc(r.error || "校验失败")}</div>`;
+    return toast(r.error || "校验失败", true);
+  }
+  a.tmdbRaw = raw;
+  a.tmdbPreview = r;
+  const out = el("#tmdbPreview");
+  if (out) out.innerHTML = tmdbPreviewHTML(a);
+  bindTmdbPreview(a);
+  syncTmdbSearchLink(a);
+}
+
+function useTmdbDraft(mode) {
+  const a = S.add;
+  if (!a.tmdbPreview || !a.tmdbPreview.draft) return;
+  a.tmdbMode = mode === "overwrite" ? "overwrite" : "merge";
+  a.draft = JSON.parse(JSON.stringify(a.tmdbPreview.draft));
+  a.step = 3;
   renderAdd();
 }
-function closeAdd() { el("#addModal").classList.remove("show"); }
+
+async function importTmdbToCurrent(mode) {
+  const a = S.add;
+  if (!a.tmdbPreview || !a.tmdbRaw || a.mode !== "edit" || !a.editId) return;
+  const overwrite = mode === "overwrite";
+  const btn = el(overwrite ? "#tmdbOverwrite" : "#tmdbMerge");
+  const originalText = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = overwrite ? "覆盖中…" : "合并中…"; }
+  const r = await api("/api/tmdb/import", {
+    method: "POST",
+    body: { json: a.tmdbRaw, targetId: a.editId, mode: overwrite ? "overwrite" : "merge" },
+  });
+  if (btn) { btn.disabled = false; btn.textContent = originalText; }
+  if (!r.ok) return toast(r.error || "导入失败", true);
+  applyWork(r.work);
+  a.tmdbRaw = "";
+  a.tmdbPreview = null;
+  a.draft = JSON.parse(JSON.stringify(r.work));
+  closeAdd();
+  renderDrawer(); renderWall(); renderStats();
+  toast(r.action === "updated"
+    ? (overwrite ? "已用 TMDB 非空字段覆盖，评分、经历、系列和用户字段已保留" : "已按保护规则合并，已有非空资料未覆盖")
+    : "已导入");
+}
+
+async function saveTmdbCreate() {
+  const a = S.add;
+  const btn = el("#saveWork");
+  const title = el("#fTitle").value.trim();
+  if (!title) return toast("标题不能为空", true);
+  const creatorsRaw = el("#fCreators").value.trim();
+  const creators = creatorsRaw ? creatorsRaw.split(/[；;]/).map(p => {
+    const m = p.split(/[：:]/);
+    return m.length > 1 ? { role: m[0].trim(), name: m.slice(1).join(":").trim() } : { role: "创作者", name: p.trim() };
+  }) : [];
+  const body = {
+    json: a.tmdbRaw,
+    mode: a.tmdbMode || "merge",
+    overrides: {
+      title,
+      originalTitle: el("#fOriginal").value.trim(),
+      year: el("#fYear").value.trim(),
+      tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
+      summary: el("#fSummary").value.trim(),
+      creators,
+    },
+  };
+  const rEl = el("#fRating");
+  if (rEl) {
+    const v = parseFloat(rEl.value);
+    if (!isNaN(v)) body.rating = v;
+  }
+  const st = el("#fFirstStatus");
+  if (st) body.firstExperience = { status: st.value, content: (el("#fFirstContent") || {}).value || "" };
+  if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
+  const r = await api("/api/tmdb/import", { method: "POST", body });
+  if (btn) { btn.disabled = false; btn.textContent = "保存入库"; }
+  if (!r.ok) return toast(r.error || "保存失败", true);
+  applyWork(r.work);
+  closeAdd(); renderTabs(); renderWall(); renderStats();
+  toast(r.action === "updated"
+    ? (a.tmdbMode === "overwrite" ? "已覆盖已有 TMDB 作品，评分、经历、系列和用户字段已保留" : "已更新相同 TMDB 条目，已有非空资料未覆盖")
+    : "已入库");
+  openDrawer(r.work.id);
+}
+
+/* ------------------------------------------------------------ 新增 / 编辑 */
+function openAdd() {
+  if (!modalIsOpen("#addModal")) rememberOverlayFocus();
+  S.add = { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge" };
+  setModalState("#addModal", true);
+  renderAdd();
+  focusAfterRender("#addBody .cat-choice, #addBody input");
+}
+function closeAdd() {
+  if (!modalIsOpen("#addModal")) return;
+  restoreOverlayFocus();
+  setModalState("#addModal", false);
+}
 
 function openEdit(w) {
-  S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null };
-  el("#addModal").classList.add("show");
+  if (!modalIsOpen("#addModal")) rememberOverlayFocus();
+  S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge" };
+  setModalState("#addModal", true);
   renderAdd();
+  focusAfterRender("#fTitle");
 }
 
 function renderAdd() {
@@ -881,7 +1281,8 @@ function renderAdd() {
     const cat = S.categories.find(x => x.key === a.category) || {};
     const sources = cat.sources || ["douban"];
     body.innerHTML = `
-      <div class="source-row">${sources.map((s, i) => `<button class="source-tab ${a.source === s ? "active" : ""}" data-src="${s}">${esc(S.sourceLabels[s] || s)}${i === 0 ? " · 主" : ""}</button>`).join("")}</div>
+      <div class="source-row">${sources.map((s, i) => `<button class="source-tab ${a.source === s ? "active" : ""}" data-src="${s}" aria-pressed="${a.source === s}">${esc(S.sourceLabels[s] || s)}${i === 0 ? " · 主" : ""}</button>`).join("")}</div>
+      ${a.category === "movie" ? tmdbImportHTML(a) : ""}
       <div class="search-row">
         <input id="addKeyword" placeholder="输入作品名，例如 诡秘之主 / 进击的巨人 / 艾尔登法环">
         <button class="btn btn-primary" id="addSearch">${ICONS.search} 搜索</button>
@@ -897,6 +1298,7 @@ function renderAdd() {
     el("#addKeyword").onkeydown = e => { if (e.key === "Enter") doSearch(); };
     el("#parseLink").onclick = doParseLink;
     el("#addLink").onkeydown = e => { if (e.key === "Enter") doParseLink(); };
+    if (a.category === "movie") bindTmdbImport(a);
     renderResults();
     el("#addFoot").innerHTML = `<button class="btn btn-ghost" id="addBack">${ICONS.back} 上一步</button><button class="btn" id="addManual">跳过，手动填写</button>`;
     el("#addBack").onclick = () => { a.step = 1; renderAdd(); };
@@ -912,14 +1314,17 @@ function renderResults() {
   if (!box) return;
   if (!a.items.length) { box.innerHTML = `<div class="muted-note" style="padding:10px 2px">搜索结果会显示在这里。</div>`; return; }
   box.innerHTML = a.items.map((it, i) => `
-    <div class="result" data-i="${i}">
+    <div class="result" data-i="${i}" tabindex="0" role="button" aria-label="选用 ${esc(it.title)}">
       <div class="result-cover">${it.cover ? `<img src="${esc(it.cover)}" loading="lazy" onerror="this.style.display='none'">` : ""}</div>
       <div class="result-main">
-        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:#6c7580;font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
+        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:var(--lenso-label-tertiary);font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
         <div class="result-meta">${esc([it.meta, it.year].filter(Boolean).join(" · "))}${it.coverMissing ? " · 该来源无封面" : ""}</div>
       </div>
     </div>`).join("");
-  elAll(".result", box).forEach(r => r.onclick = () => pickItem(Number(r.dataset.i)));
+  elAll(".result", box).forEach(r => {
+    r.onclick = () => pickItem(Number(r.dataset.i));
+    r.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickItem(Number(r.dataset.i)); } };
+  });
 }
 
 async function doSearch() {
@@ -966,6 +1371,11 @@ function renderForm() {
   const gaps = (EXPECT_FIELDS[cat] || []).filter(k => !infoboxKeys.includes(k));
   const rfSources = (S.categories.find(c => c.key === cat) || {}).sources || [];
   const rfCur = rfSources.includes(a.refSource) ? a.refSource : (rfSources[0] || "");
+  const extPlatforms = EXTERNAL_SEARCH_PLATFORMS[cat] || [];
+  const extTitle = (d.title || "").trim();
+  const extHint = extTitle
+    ? "在新标签页打开平台搜索；找到作品后复制详情页链接，粘贴到下方解析。"
+    : "当前标题为空，填写标题后即可使用站外搜索。";
   body.innerHTML = `
     <div class="cover-preview" style="margin-bottom:16px">
       <div class="cp-box">${(d.previewUrl || d.coverUrl) ? `<img id="cpImg" src="${esc(d.previewUrl || d.coverUrl)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
@@ -1001,12 +1411,21 @@ function renderForm() {
         <h4>重新获取作品信息</h4>
         <span class="hint">覆盖标题 / 原名 / 年份 / 标签 / 简介 / 来源字段 / 封面；评分、经历、我的字段保留</span>
       </div>
+      ${a.category === "movie" ? tmdbImportHTML(a) : ""}
       <div class="source-row" id="rfSources">${rfSources.map(s =>
-        `<button class="source-tab ${rfCur === s ? "active" : ""}" data-rfsrc="${s}">${esc(S.sourceLabels[s] || s)}</button>`).join("")}</div>
+        `<button class="source-tab ${rfCur === s ? "active" : ""}" data-rfsrc="${s}" aria-pressed="${rfCur === s}">${esc(S.sourceLabels[s] || s)}</button>`).join("")}</div>
       <div class="search-row">
         <input id="rfKeyword" value="${esc(d.title || "")}" placeholder="用标题搜索该来源">
         <button class="btn btn-primary" id="rfSearch">${ICONS.search} 搜索</button>
       </div>
+      ${a.mode === "edit" && extPlatforms.length ? `
+      <div class="external-search" id="externalSearch">
+        <div class="external-search-head">
+          <h4>站外搜索</h4>
+          <span class="hint" id="externalSearchHint">${esc(extHint)}</span>
+        </div>
+        <div class="source-row external-search-platforms" id="externalSearchPlatforms" style="${extTitle ? "" : "display:none"}">${externalSearchLinksHTML(extPlatforms, extTitle)}</div>
+      </div>` : ""}
       <div class="link-row">
         <input id="rfLink" placeholder="或粘贴作品链接：起点 / 番茄 / 豆瓣图书 / Bangumi / Steam">
         <button class="btn" id="rfParse">解析</button>
@@ -1035,6 +1454,22 @@ function renderForm() {
     el("#rfParse").onclick = doRefillParse;
     el("#rfKeyword").onkeydown = ev => { if (ev.key === "Enter") doRefillSearch(); };
     el("#rfLink").onkeydown = ev => { if (ev.key === "Enter") doRefillParse(); };
+    const extBox = el("#externalSearchPlatforms");
+    const extHintEl = el("#externalSearchHint");
+    const titleInput = el("#fTitle");
+    if (extBox && extHintEl && titleInput && extPlatforms.length) {
+      const syncExternalSearch = () => {
+        const kw = (titleInput.value || "").trim();
+        extBox.style.display = kw ? "flex" : "none";
+        extBox.innerHTML = externalSearchLinksHTML(extPlatforms, kw);
+        extHintEl.textContent = kw
+          ? "在新标签页打开平台搜索；找到作品后复制详情页链接，粘贴到下方解析。"
+          : "当前标题为空，填写标题后即可使用站外搜索。";
+      };
+      titleInput.addEventListener("input", syncExternalSearch);
+      syncExternalSearch();
+    }
+    bindTmdbImport(a);
     renderRefillResults();
   }
 }
@@ -1067,15 +1502,18 @@ function renderRefillResults() {
     return;
   }
   box.innerHTML = items.map((it, i) => `
-    <div class="result" data-rfi="${i}">
+    <div class="result" data-rfi="${i}" tabindex="0" role="button" aria-label="用 ${esc(it.title)} 更新信息">
       <div class="result-cover">${it.cover ? `<img src="${esc(it.cover)}" loading="lazy" onerror="this.style.display='none'">` : ""}</div>
       <div class="result-main">
-        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:#6c7580;font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
+        <div class="result-title">${esc(it.title)}${it.subtitle ? ` <span style="color:var(--lenso-label-tertiary);font-size:11px">${esc(it.subtitle)}</span>` : ""}</div>
         <div class="result-meta">${esc([it.meta, it.year].filter(Boolean).join(" · "))}${it.coverMissing ? " · 该来源无封面" : ""}</div>
       </div>
       <span class="refill-tag">用这条更新</span>
     </div>`).join("");
-  elAll("[data-rfi]", box).forEach(r => r.onclick = () => pickRefill(Number(r.dataset.rfi)));
+  elAll("[data-rfi]", box).forEach(r => {
+    r.onclick = () => pickRefill(Number(r.dataset.rfi));
+    r.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickRefill(Number(r.dataset.rfi)); } };
+  });
 }
 
 async function pickRefill(i) {
@@ -1145,6 +1583,7 @@ async function saveWork() {
     applyWork(r.work); closeAdd(); renderDrawer(); renderWall(); toast("已保存");
     return;
   }
+  if (a.tmdbRaw) return saveTmdbCreate();
   const body = { category: a.category, draft };
   const rEl = el("#fRating");
   if (rEl) {
@@ -1164,6 +1603,7 @@ async function saveWork() {
 
 /* ------------------------------------------------------------ 设置 / 备份 */
 function openSettings() {
+  if (!modalIsOpen("#settingsModal")) rememberOverlayFocus();
   const st = S.settings || {};
   el("#settingsBody").innerHTML = `
     <div class="section-head"><h3>外观</h3><div class="line"></div></div>
@@ -1215,9 +1655,10 @@ function openSettings() {
       <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
       <button class="btn btn-danger" id="wipeAll">清空全部数据</button>
     </div>
-    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.1.0")} · 所有数据只存在这台电脑上</div>`;
-  el("#settingsModal").classList.add("show");
+    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.2.0")} · 所有数据只存在这台电脑上</div>`;
+  setModalState("#settingsModal", true);
   applyAppearance(false);
+  focusAfterRender("#settingsClose");
   el("#setModeSeg").onclick = (e) => {
     const b = e.target.closest("button[data-v]");
     if (b) setMode(b.dataset.v);
@@ -1313,7 +1754,11 @@ async function loadBackups() {
   });
 }
 
-function closeSettings() { el("#settingsModal").classList.remove("show"); }
+function closeSettings() {
+  if (!modalIsOpen("#settingsModal")) return;
+  restoreOverlayFocus();
+  setModalState("#settingsModal", false);
+}
 
 /* ------------------------------------------------------------ 全局事件 */
 function bindGlobal() {
@@ -1324,10 +1769,13 @@ function bindGlobal() {
   el("#menuBtn").onclick = openSettings;
   el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
-  elAll("#groupSeg button").forEach(b => b.onclick = () => {
-    S.filters.group = b.dataset.group;
-    elAll("#groupSeg button").forEach(x => x.classList.toggle("on", x === b));
-    renderWall();
+  elAll("#groupSeg button").forEach(b => {
+    b.setAttribute("aria-pressed", b.classList.contains("on"));
+    b.onclick = () => {
+      S.filters.group = b.dataset.group;
+      elAll("#groupSeg button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
+      renderWall();
+    };
   });
   elAll("#sizeSeg button").forEach(b => b.onclick = () => setSize(b.dataset.size));
   el("#newSeriesBtn").onclick = () => openSeriesModal();
@@ -1346,6 +1794,19 @@ function bindGlobal() {
     S.settings = r.settings; toast("设置已保存"); closeSettings();
   };
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      const root = activeOverlayRoot();
+      if (root) {
+        const items = Array.from(root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+          .filter(x => x.getClientRects().length && getComputedStyle(x).visibility !== "hidden");
+        if (items.length) {
+          const first = items[0], last = items[items.length - 1];
+          if (!root.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); return; }
+          if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); return; }
+        }
+      }
+    }
     if (e.key === "Escape") {
       if (el("#addModal").classList.contains("show")) closeAdd();
       else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();

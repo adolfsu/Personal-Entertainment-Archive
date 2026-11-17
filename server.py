@@ -6,6 +6,7 @@
 职责：数据落盘与备份、元数据抓取与聚合、封面本地化。
 """
 import base64
+import difflib
 import hashlib
 import html as _html
 import io
@@ -16,8 +17,10 @@ import os
 import re
 import shutil
 import socket
+import struct
 import threading
 import time
+import unicodedata
 import uuid
 import webbrowser
 import zipfile
@@ -28,7 +31,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.1.0"
+VERSION = "1.6.4"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
@@ -48,7 +51,7 @@ CATEGORIES = {
     "game": {"label": "游戏", "bangumi_type": 4, "sources": ["bangumi", "steam"]},
     "novel": {"label": "网文", "bangumi_type": 1, "sources": ["weread", "web"]},
     "book": {"label": "出版书", "bangumi_type": 1, "sources": ["douban", "bangumi", "weread"]},
-    "movie": {"label": "影视剧", "bangumi_type": 6, "sources": ["bangumi", "bilibili", "douban"]},
+    "movie": {"label": "影视剧", "bangumi_type": 6, "sources": ["bangumi", "douban", "cinemeta", "bilibili"]},
     "shortdrama": {"label": "短剧", "bangumi_type": 6, "sources": ["hongguo"]},
 }
 
@@ -63,8 +66,8 @@ STATUS_LABELS = {
     "shortdrama": {"not_started": "未开始", "planned": "想看", "active": "在追", "completed": "已看完", "paused": "搁置", "dropped": "弃坑"},
 }
 SOURCE_LABELS = {"bangumi": "Bangumi", "douban": "豆瓣", "weread": "微信读书", "steam": "Steam",
-                 "bilibili": "B站", "web": "搜索引擎", "anilist": "AniList", "manual": "手动",
-                 "link": "链接解析", "hongguo": "红果"}
+                 "bilibili": "B站", "cinemeta": "Cinemeta", "web": "搜索引擎", "anilist": "AniList",
+                 "manual": "手动", "link": "链接解析", "hongguo": "红果", "tmdb": "TMDB"}
 SERIES_KINDS = {"mixed": "跨媒介系列", "single": "单一媒介系列", "bookset": "丛书"}
 SERIES_ROLES = {"main": "正传", "sequel": "续作", "side": "外传", "adaptation": "改编",
                 "remake": "重制", "port": "移植", "collection": "合集", "dlc": "DLC", "crossover": "联动"}
@@ -353,7 +356,8 @@ PROXY_PORTS = ["7897", "7890", "10808", "1080", "8888", "10809", "2080", "8118"]
 IMAGE_HOST_SUFFIXES = (
     "bgm.tv", "doubanio.com", "douban.com", "steamstatic.com",
     "steamcdn-a.akamaihd.net", "hdslb.com", "biliimg.com", "qq.com",
-    "hongguoduanju.com", "douyinpic.com", "byteimg.com",
+    "hongguoduanju.com", "douyinpic.com", "byteimg.com", "metahub.space",
+    "tmdb.org", "themoviedb.org",
 )
 
 
@@ -459,6 +463,62 @@ def _image_ext(body, url):
     return ext if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
 
 
+def _image_size(body):
+    """读图片像素尺寸（PNG/JPEG/WebP/GIF），只用于封面清晰度校验。失败返回 None。"""
+    if not body:
+        return None
+    try:
+        if body[:8] == b"\x89PNG\r\n\x1a\n" and len(body) >= 24:
+            w, h = struct.unpack(">II", body[16:24])
+            return (w, h) if w and h else None
+        if body[:2] == b"\xff\xd8":
+            i, n = 2, len(body)
+            while i + 4 <= n:
+                if body[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = body[i + 1]
+                if marker == 0xFF:
+                    i += 1
+                    continue
+                if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                seg = struct.unpack(">H", body[i + 2:i + 4])[0]
+                if seg < 2:
+                    return None
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    if i + 9 > n:
+                        return None
+                    h, w = struct.unpack(">HH", body[i + 5:i + 9])
+                    return (w, h) if w and h else None
+                if marker == 0xDA:
+                    return None
+                i += 2 + seg
+            return None
+        if body[:4] == b"RIFF" and body[8:12] == b"WEBP" and len(body) >= 25:
+            chunk = body[12:16]
+            if chunk == b"VP8X":
+                w = int.from_bytes(body[24:27], "little") + 1
+                h = int.from_bytes(body[27:30], "little") + 1
+                return (w, h)
+            if chunk == b"VP8 ":
+                w = struct.unpack("<H", body[26:28])[0] & 0x3FFF
+                h = struct.unpack("<H", body[28:30])[0] & 0x3FFF
+                return (w, h) if w and h else None
+            if chunk == b"VP8L":
+                v = int.from_bytes(body[21:25], "little")
+                return ((v & 0x3FFF) + 1, ((v >> 14) & 0x3FFF) + 1)
+            return None
+        if body[:6] in (b"GIF87a", b"GIF89a") and len(body) >= 10:
+            w, h = struct.unpack("<HH", body[6:10])
+            return (w, h) if w and h else None
+    except Exception:
+        return None
+    return None
+
+
 def _download_image(url, referer=None, timeout=10, want_proxy=False):
     """下载图片。Bangumi 图片直连必超时，有代理时只走代理，不再白等一轮直连。"""
     host = (urlparse(url).hostname or "").lower()
@@ -535,7 +595,17 @@ def save_cover(url, referer=None, proxy=False, timeout=10):
     url = url.strip()
     if url.startswith("/covers/") or url.startswith("covers/"):
         return url
-    body = _download_image(url, referer=referer, timeout=timeout, want_proxy=proxy)
+    candidates = [url]
+    host = (urlparse(url).hostname or "").lower()
+    if host in ("image.tmdb.org", "media.themoviedb.org") and "/t/p/original/" in url:
+        # original 偶发超时/被 CDN 拒绝时，回退到同图 w500；不改变其他来源的图片规则。
+        candidates.append(url.replace("/t/p/original/", "/t/p/w500/", 1))
+    body = None
+    for candidate in candidates:
+        body = _download_image(candidate, referer=referer, timeout=timeout, want_proxy=proxy)
+        if body:
+            url = candidate
+            break
     if not body:
         return None
     ext = _image_ext(body, url)
@@ -579,17 +649,79 @@ def _infobox_pairs(infobox):
     return pairs
 
 
+def _bangumi_fetch_type(keyword, t):
+    """查 Bangumi 某一 type 的搜索结果；请求失败时直接抛出，由调用方决定降级。"""
+    url = ("https://api.bgm.tv/search/subject/" + quote(keyword) +
+           f"?type={t}&responseGroup=large&max_results=10")
+    j = http_json(url, headers={"User-Agent": UA_BGM}, proxy=resolve_proxy(), timeout=8)
+    return j.get("list") or []
+
+
+_TITLE_STRIP_RE = re.compile(
+    r"[\s\u3000…·・:：;；,，.。!！?？/\\|'\"“”‘’()（）\[\]【】<>《》+＋~～*＊#＃&＆%％\-—–_]+")
+
+
+def _norm_title(text):
+    """标题标准化：全半角统一、去空白和标点，只留可比较的字词。"""
+    s = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
+    return _TITLE_STRIP_RE.sub("", s)
+
+
+def _query_year(keyword):
+    m = re.search(r"(19\d{2}|20\d{2})", keyword or "")
+    return m.group(1) if m else ""
+
+
+def _valid_year(value):
+    y = str(value or "")
+    return y if re.fullmatch(r"(19|20)\d{2}", y) else ""
+
+
+def _bangumi_rank(items, keyword):
+    """按标题相关度排序；标题优先级高于资料完整度，完全并列时保留原始顺序。"""
+    nk = _norm_title(keyword)
+    qy = _query_year(keyword)
+    ranked = []
+    for idx, it in enumerate(items):
+        nt = _norm_title(it.get("title"))
+        ratio = difflib.SequenceMatcher(None, nk, nt).ratio() if (nk and nt) else 0.0
+        if nt and nt == nk:
+            tier = 0                      # 标准化后完全一致
+        elif nk and nk in nt:
+            tier = 1                      # 标题包含搜索词
+        elif nt and len(nt) >= 2 and nt in nk:
+            tier = 2                      # 搜索词包含标题
+        elif ratio >= 0.5:
+            tier = 3                      # 模糊匹配
+        else:
+            tier = 4
+        year_pen = 0
+        if qy:
+            iy = _valid_year(it.get("year"))
+            year_pen = 0 if iy == qy else (1 if iy else 0.5)
+        # 搜索接口不返回简介 / infobox，这里只能用封面和有效年份判断资料完整度
+        comp_pen = (0 if it.get("cover") else 1) + (0 if _valid_year(it.get("year")) else 1)
+        ranked.append(((tier, round(1 - ratio, 3), year_pen, comp_pen, idx), it))
+    ranked.sort(key=lambda pair: pair[0])
+    return [it for _, it in ranked]
+
+
 def bangumi_search(keyword, category):
     bt = CATEGORIES.get(category, {}).get("bangumi_type", 1)
-    types = [bt]
+    # 影视剧同时查 type=6（三次元）和 type=2（动画），其余分类保持单 type 行为
+    types = [6, 2] if category == "movie" else [bt]
     out, seen = [], set()
+    ok_count, errors = 0, []
     for t in types:
-        url = ("https://api.bgm.tv/search/subject/" + quote(keyword) +
-               f"?type={t}&responseGroup=large&max_results=10")
-        j = http_json(url, headers={"User-Agent": UA_BGM}, proxy=resolve_proxy(), timeout=8)
-        for it in (j.get("list") or []):
+        try:
+            items = _bangumi_fetch_type(keyword, t)
+            ok_count += 1
+        except Exception as e:
+            errors.append(e)
+            continue
+        for it in items:
             sid = it.get("id")
-            if sid in seen:
+            if sid is None or sid in seen:
                 continue
             seen.add(sid)
             imgs = it.get("images") or {}
@@ -602,6 +734,11 @@ def bangumi_search(keyword, category):
                 "meta": (it.get("name") or "") + (" · " + it.get("air_date") if it.get("air_date") else ""),
                 "ref": {"source": "bangumi", "id": sid, "url": f"https://bgm.tv/subject/{sid}"},
             })
+    # 一组失败、另一组成立（哪怕为空）时照常返回；两组都失败才抛错，交给现有错误处理
+    if ok_count == 0 and errors:
+        raise errors[0]
+    if category == "movie":
+        out = _bangumi_rank(out, keyword)
     return out[:10]
 
 
@@ -637,7 +774,259 @@ def bangumi_draft(ref):
     }
 
 
+# ---------------------------------------------------------------- 源：Cinemeta
+CINEMETA_BASE = "https://v3-cinemeta.strem.io"
+CINEMETA_IMAGE_BASE = "https://images.metahub.space"
+CINEMETA_ID_RE = re.compile(r"tt\d{5,}")
+
+
+def _cinemeta_get_json(url, timeout=12):
+    """优先走当前代理，代理失败时再直连；两者都失败才抛错。"""
+    proxy = resolve_proxy()
+    try:
+        return http_json(url, proxy=proxy, timeout=timeout)
+    except Exception:
+        if proxy:
+            return http_json(url, proxy=None, timeout=timeout)
+        raise
+
+
+def _cinemeta_year(value):
+    m = re.search(r"(19|20)\d{2}", str(value or ""))
+    return m.group(0) if m else ""
+
+
+def _cinemeta_list(value):
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _cinemeta_search_type(kind, keyword, timeout=12):
+    url = (f"{CINEMETA_BASE}/catalog/{kind}/top/search="
+           + quote(keyword, safe="") + ".json")
+    j = _cinemeta_get_json(url, timeout=timeout)
+    return j.get("metas") or []
+
+
+def _cinemeta_rank(items, keyword, counts=None):
+    """本地相关性排序：精确标题 > 标题包含搜索词 > 搜索词包含标题 > 模糊 > 其他。
+
+    Cinemeta 只有英文标题，中文查询通常无法做标题相似度，因此额外用“单一类型强命中”
+    作为同档内的加权：某一类型只返回 1 条、另一类型返回多条时，优先那 1 条。
+    例如中文搜《绝命毒师》时，series 只有 Breaking Bad，movie 却有多条无关结果。
+    """
+    qn = _norm_title(keyword)
+    qy = _query_year(keyword)
+    counts = counts or {}
+    ranked = []
+    for idx, it in enumerate(items):
+        nt = _norm_title(it.get("title"))
+        ratio = difflib.SequenceMatcher(None, qn, nt).ratio() if qn and nt else 0
+        if nt and qn and nt == qn:
+            tier = 0
+        elif nt and qn and qn in nt:
+            tier = 1
+        elif nt and qn and nt in qn:
+            tier = 2
+        elif ratio >= 0.5:
+            tier = 3
+        else:
+            tier = 4
+        kind = (it.get("ref") or {}).get("kind")
+        other = "series" if kind == "movie" else "movie"
+        type_pen = 0
+        if kind and counts.get(kind) == 1 and counts.get(other, 0) > 1:
+            type_pen = 0
+        elif other and counts.get(other) == 1 and counts.get(kind, 0) > 1:
+            type_pen = 0.5
+        year_pen = 0
+        if qy:
+            iy = _valid_year(it.get("year"))
+            year_pen = 0 if iy == qy else (1 if iy else 0.5)
+        ranked.append(((tier, type_pen, round(1 - ratio, 3), year_pen, idx), it))
+    ranked.sort(key=lambda pair: pair[0])
+    return [it for _, it in ranked]
+
+
+def cinemeta_search(keyword, category):
+    """Cinemeta 影视搜索：影视剧分类同时查 movie 和 series，保留真实 IMDb ID。"""
+    if category != "movie":
+        return []
+    out, seen, errors = [], set(), []
+    counts = {}
+    ok_count = 0
+    for kind in ("movie", "series"):
+        try:
+            metas = _cinemeta_search_type(kind, keyword)
+            ok_count += 1
+            counts[kind] = len(metas)
+        except Exception as e:
+            errors.append(e)
+            continue
+        for it in metas:
+            tt = str(it.get("imdb_id") or it.get("id") or "").strip()
+            if not CINEMETA_ID_RE.fullmatch(tt):
+                continue
+            if it.get("type") and it.get("type") != kind:
+                continue
+            title = str(it.get("name") or "").strip()
+            if not title or tt in seen:
+                continue
+            seen.add(tt)
+            year = _cinemeta_year(it.get("releaseInfo") or it.get("year"))
+            poster = it.get("poster") or f"{CINEMETA_IMAGE_BASE}/poster/small/{tt}/img"
+            out.append({
+                "title": title,
+                "subtitle": "",
+                "year": year,
+                "cover": image_proxy_url(poster),
+                "meta": ("电影" if kind == "movie" else "剧集") + (f" · {year}" if year else ""),
+                "ref": {"source": "cinemeta", "id": tt, "kind": kind, "title": title,
+                        "year": year, "poster": poster},
+            })
+    # 一组失败、另一组有结果时照常返回；两组都失败才抛错，交给 /api/search 的现有错误处理。
+    if ok_count == 0 and errors:
+        raise errors[0]
+    return _cinemeta_rank(out, keyword, counts)[:20]
+
+
+def _cinemeta_poster(tt, timeout=8):
+    """下载并校验 Cinemeta 海报；original 失败时回退 large。返回实际尺寸。"""
+    for label in ("original", "large"):
+        url = f"{CINEMETA_IMAGE_BASE}/poster/{label}/{tt}/img"
+        body = _download_image(url, referer=f"{CINEMETA_BASE}/", timeout=timeout, want_proxy=False)
+        if not body:
+            body = _download_image(url, referer=f"{CINEMETA_BASE}/", timeout=timeout, want_proxy=True)
+        if not body:
+            continue
+        size = _image_size(body)
+        if size:
+            return {"url": url, "width": size[0], "height": size[1], "quality": label}
+    return None
+
+
+def cinemeta_draft(ref):
+    tt = str(ref.get("id") or ref.get("imdb_id") or "").strip()
+    if not CINEMETA_ID_RE.fullmatch(tt):
+        raise ValueError("无效的 IMDb ID")
+    kind = ref.get("kind") or ref.get("type") or "movie"
+    if kind not in ("movie", "series"):
+        kind = "movie"
+    try:
+        j = _cinemeta_get_json(f"{CINEMETA_BASE}/meta/{kind}/{tt}.json")
+    except Exception:
+        if kind != "movie":
+            raise
+        j = _cinemeta_get_json(f"{CINEMETA_BASE}/meta/series/{tt}.json")
+        kind = "series"
+    meta = j.get("meta") or {}
+    if not meta:
+        raise RuntimeError("Cinemeta 未返回详情")
+    title = str(meta.get("name") or ref.get("title") or "").strip()
+    if not title:
+        raise RuntimeError("Cinemeta 详情缺少标题")
+
+    genres = _cinemeta_list(meta.get("genres") or meta.get("genre"))
+    directors = _cinemeta_list(meta.get("director"))
+    writers = _cinemeta_list(meta.get("writer"))
+    cast = _cinemeta_list(meta.get("cast"))
+    creators = []
+    if directors:
+        creators.append({"role": "导演", "name": "、".join(directors[:8])})
+    if writers:
+        creators.append({"role": "编剧", "name": "、".join(writers[:8])})
+    if cast:
+        creators.append({"role": "主演", "name": "、".join(cast[:8])})
+
+    infobox = []
+
+    def add_info(key, value):
+        value = to_text(value).strip() if value not in (None, "", []) else ""
+        if value:
+            infobox.append({"key": key, "value": value})
+
+    add_info("条目类型", "电影" if kind == "movie" else "剧集")
+    if genres:
+        add_info("类型", "、".join(genres))
+    add_info("国家/地区", meta.get("country"))
+    add_info("时长", meta.get("runtime"))
+    add_info("上映/首播", str(meta.get("released") or "")[:10] or meta.get("releaseInfo"))
+    add_info("状态", meta.get("status"))
+    add_info("IMDb 评分", meta.get("imdbRating"))
+    add_info("获奖", meta.get("awards"))
+    add_info("IMDb ID", tt)
+    add_info("TMDB ID", meta.get("moviedb_id"))
+    add_info("TVDB ID", meta.get("tvdb_id"))
+
+    rating = None
+    if meta.get("imdbRating") not in (None, ""):
+        try:
+            rating = round(float(meta.get("imdbRating")), 1)
+        except Exception:
+            rating = None
+
+    poster = _cinemeta_poster(tt)
+    poster_url = poster["url"] if poster else f"{CINEMETA_IMAGE_BASE}/poster/original/{tt}/img"
+    draft = {
+        "title": title,
+        "originalTitle": "",
+        "aliases": [],
+        "year": _cinemeta_year(meta.get("year") or meta.get("releaseInfo") or meta.get("released")),
+        "coverUrl": poster_url,
+        "previewUrl": image_proxy_url(poster_url),
+        "coverProxy": True,
+        "coverReferer": f"{CINEMETA_BASE}/",
+        "summary": strip_html(meta.get("description") or ""),
+        "tags": genres,
+        "creators": creators,
+        "infobox": infobox,
+        "ratingRef": rating,
+        "ratingMeta": {"source": "IMDb"},
+        "source": {"name": "cinemeta", "label": "Cinemeta",
+                   "url": f"https://www.imdb.com/title/{tt}/", "id": tt},
+        "extra": {"type": kind, "status": meta.get("status"),
+                  "videos": len(meta.get("videos") or [])},
+    }
+    if poster:
+        draft["coverWidth"] = poster["width"]
+        draft["coverHeight"] = poster["height"]
+        draft["coverNote"] = (f"Cinemeta {poster['quality']} {poster['width']}×{poster['height']}"
+                              + ("（original 回退）" if poster["quality"] != "original" else ""))
+    else:
+        draft["coverNote"] = "Cinemeta 封面下载校验失败，保留 original 地址"
+    return draft
+
+
 # ---------------------------------------------------------------- 源：豆瓣
+DOUBAN_POSTER_MIN_WIDTH = 300
+
+
+def _douban_large_poster(pic, timeout=8):
+    """豆瓣电影海报：s_ratio_poster 换成 l_ratio_poster，并验证真实像素。
+
+    只做这一处 URL 规格替换，不访问详情页；失败/不是图片/宽度不足都返回 None。
+    """
+    pic = (pic or "").strip()
+    if "s_ratio_poster" not in pic:
+        return None
+    large = pic.replace("s_ratio_poster", "l_ratio_poster")
+    try:
+        status, body, _, _ = http_get(
+            large, headers={"Referer": "https://movie.douban.com/", "Accept": "image/*"}, timeout=timeout)
+        if status != 200 or not body or len(body) < 2000:
+            return None
+        size = _image_size(body)
+        if not size or size[0] < DOUBAN_POSTER_MIN_WIDTH:
+            return None
+        return {"url": large, "width": size[0], "height": size[1]}
+    except Exception:
+        return None
+
+
 def douban_search(keyword, category):
     kind = "book" if category in ("book", "novel") else "movie"
     base = "https://book.douban.com" if kind == "book" else "https://movie.douban.com"
@@ -694,11 +1083,16 @@ def douban_draft(ref):
             pass
     title = ref.get("title") or ""
     pic = ref.get("cover") or ""
+    is_book = ref.get("kind") == "book"
+    large = None
+    if pic and not is_book:
+        # 电影海报只把 s_ratio_poster 换成 l_ratio_poster，验证不过就保留原图。
+        large = _douban_large_poster(pic)
     if pic and "/view/subject/s/" in pic:
         pic_large = pic.replace("/view/subject/s/", "/view/subject/l/")
     else:
-        pic_large = pic
-    return {
+        pic_large = (large or {}).get("url") or pic
+    draft = {
         "title": title,
         "originalTitle": ref.get("subtitle") or "",
         "year": ref.get("year") or "",
@@ -712,9 +1106,80 @@ def douban_draft(ref):
         "ratingMeta": {"votes": votes},
         "source": {"name": "douban", "label": "豆瓣", "url": url or "", "id": ref.get("id")},
     }
+    if large:
+        draft["coverWidth"] = large["width"]
+        draft["coverHeight"] = large["height"]
+        draft["coverNote"] = f"高清海报 {large['width']}×{large['height']}"
+    return draft
 
 
 # ---------------------------------------------------------------- 源：微信读书
+WEREAD_COVER_MIN_WIDTH = 300
+
+
+def _weread_cover_key(cover_url):
+    """从 s_ 封面名推出对应 t8_ 封面的键，例如 s_yuewen_834464.jpg -> yuewen_834464。"""
+    try:
+        base = os.path.basename(urlparse(cover_url or "").path)
+        stem = os.path.splitext(base)[0]
+        return stem[2:] if stem.startswith("s_") else stem
+    except Exception:
+        return ""
+
+
+def _verify_weread_cover(url, timeout=8):
+    """下载并确认返回的确是图片，且宽度达到 WEREAD_COVER_MIN_WIDTH。"""
+    try:
+        status, body, _, _ = http_get(
+            url, headers={"Referer": "https://weread.qq.com/", "Accept": "image/*"}, timeout=timeout)
+        if status != 200 or not body or len(body) < 2000:
+            return None
+        size = _image_size(body)
+        if not size or size[0] < WEREAD_COVER_MIN_WIDTH:
+            return None
+        return {"url": url, "width": size[0], "height": size[1]}
+    except Exception:
+        return None
+
+
+def _weread_large_cover(deep_link, small_cover="", timeout=8):
+    """从 book-detail 页提取 t8_ 大封面并校验；任何失败都返回 None，不影响草稿。"""
+    link = (deep_link or "").strip()
+    try:
+        u = urlparse(link)
+        if u.scheme not in ("http", "https"):
+            return None
+        if (u.hostname or "").lower() not in ("weread.qq.com", "www.weread.qq.com"):
+            return None
+        if "/book-detail" not in (u.path or ""):
+            return None
+        status, body, _, _ = http_get(link, headers={"Referer": "https://weread.qq.com/"}, timeout=timeout)
+        if status != 200 or not body:
+            return None
+        html = body.decode("utf-8", "ignore")
+        html = html.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+        found = []
+        for m in re.finditer(r"https?://[^\"'<>\\\s)]+?/t8_[^\"'<>\\\s)]+?\.(?:jpg|jpeg|png|webp)", html, re.I):
+            cand = _html.unescape(m.group(0))
+            if cand not in found:
+                found.append(cand)
+        if not found:
+            return None
+        key = _weread_cover_key(small_cover).lower()
+        if key:
+            for cand in found:
+                base = os.path.basename(urlparse(cand).path).lower()
+                if base.startswith("t8_" + key):
+                    return _verify_weread_cover(cand, timeout=timeout)
+            # 有 s_ 基准名但对不上 t8_，宁可退回缩略图，也不拿别的图冒充封面。
+            return None
+        if len(found) == 1:
+            return _verify_weread_cover(found[0], timeout=timeout)
+    except Exception:
+        return None
+    return None
+
+
 def weread_search(keyword, category):
     url = "https://weread.qq.com/web/search/global?keyword=" + quote(keyword)
     try:
@@ -749,6 +1214,15 @@ def weread_draft(ref):
     info = ref.get("book") or {}
     cover = info.get("cover") or ""
     placeholder = (not cover) or ("logo_url" in cover) or ("assets/" in cover)
+    if placeholder:
+        cover = ""
+    # 搜索接口给的是 s_ 缩略图（约 70px 宽）。详情页里存在同名 t8_ 大图，
+    # 抓不到/校验不过就静默回退到 s_，绝不因为封面失败影响资料导入。
+    large = None
+    if cover:
+        large = _weread_large_cover(info.get("deepLink") or "", cover)
+    if large:
+        cover = large["url"]
     rating = round((info.get("newRating") or 0) / 100, 1) if info.get("newRating") else None
     infobox = []
     for k, label in [("author", "作者"), ("publisher", "出版社"), ("newRatingCount", "评价人数")]:
@@ -757,11 +1231,11 @@ def weread_draft(ref):
             infobox.append({"key": label, "value": str(v)})
     if info.get("finished") in (0, 1):
         infobox.append({"key": "连载状态", "value": "已完结" if info.get("finished") == 1 else "连载中"})
-    return {
+    draft = {
         "title": clean_weread_title(info.get("title") or ""),
         "originalTitle": info.get("title") or "",
         "year": "",
-        "coverUrl": "" if placeholder else cover,
+        "coverUrl": cover,
         "coverReferer": "https://weread.qq.com/",
         "summary": strip_html(info.get("intro")),
         "tags": [],
@@ -771,6 +1245,13 @@ def weread_draft(ref):
         "ratingMeta": {"votes": info.get("newRatingCount")},
         "source": {"name": "weread", "label": "微信读书", "url": info.get("deepLink") or "", "id": str(info.get("bookId") or "")},
     }
+    if large:
+        draft["coverWidth"] = large["width"]
+        draft["coverHeight"] = large["height"]
+        draft["coverNote"] = f"高清封面 {large['width']}×{large['height']}"
+    elif cover:
+        draft["coverNote"] = "微信读书缩略图（详情页高清图未取到）"
+    return draft
 
 
 # ---------------------------------------------------------------- 源：Steam
@@ -1019,6 +1500,112 @@ def parse_qidian(book_id):
     }
 
 
+def _fanqie_decode_image_url(value):
+    """还原番茄页面里的 HTML 实体和 JSON 转义斜杠。"""
+    if not isinstance(value, str):
+        return ""
+    value = _html.unescape(value).strip()
+    return value.replace("\\u002F", "/").replace("\\u002f", "/").replace("\\/", "/")
+
+
+def _fanqie_cover_candidates(txt, title):
+    """按可信度收集番茄书籍封面；排除详情页里的作者头像。"""
+    candidates = []
+
+    def add(url):
+        url = _fanqie_decode_image_url(url)
+        if not url.startswith(("http://", "https://")):
+            return
+        if "-novel-sign" not in url and "p3-reading-sign" not in url:
+            return
+        if url not in candidates:
+            candidates.append(url)
+
+    # 1) JSON-LD 的 image 与书名直接关联，是主封面最可靠的来源。
+    for raw in re.findall(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                          txt, re.S | re.I):
+        try:
+            data = json.loads(_html.unescape(raw).strip())
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("@type") in ("NewsArticle", "Book", "CreativeWork") and node.get("image"):
+                    headline = str(node.get("headline") or node.get("name") or "")
+                    title_key = re.sub(r"\s+", "", title or "")
+                    if not title_key or title_key in re.sub(r"\s+", "", headline):
+                        images = node["image"]
+                        if isinstance(images, str):
+                            add(images)
+                        elif isinstance(images, list):
+                            for image in images:
+                                add(image if isinstance(image, str) else (image or {}).get("url"))
+                        elif isinstance(images, dict):
+                            add(images.get("url") or images.get("contentUrl"))
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+
+    # 2) 页面 img 标签：保留 p9 主封面，排除 author-img / alt 含「作者」的头像。
+    author_urls = set()
+    for tag in re.findall(r'<img\b[^>]*>', txt, re.S | re.I):
+        src = re.search(r'\bsrc=["\']([^"\']+)["\']', tag, re.I)
+        alt = re.search(r'\balt=["\']([^"\']*)["\']', tag, re.I)
+        cls = re.search(r'\bclass=["\']([^"\']*)["\']', tag, re.I)
+        if not src:
+            continue
+        src = _fanqie_decode_image_url(src.group(1))
+        alt = _html.unescape(alt.group(1)) if alt else ""
+        cls = _html.unescape(cls.group(1)) if cls else ""
+        if "作者" in alt or "author-img" in cls:
+            author_urls.add(src)
+            continue
+        add(src)
+
+    # 3) 兜底：只接受能明确排除作者头像的 p3 候选。
+    for raw in re.findall(r'https://p3-reading-sign[^"\'\s<>\\]+', txt, re.I):
+        url = _fanqie_decode_image_url(raw)
+        if url not in author_urls:
+            add(url)
+    for raw in re.findall(r'https://p\d+-novel-sign[^"\'\s<>\\]+', txt, re.I):
+        add(raw)
+    for raw in re.findall(r'https://p\d+-reading-sign[^"\'\s<>\\]+', txt, re.I):
+        url = _fanqie_decode_image_url(raw)
+        if url not in author_urls:
+            add(url)
+
+    return candidates
+
+
+def _pick_fanqie_cover(txt, title):
+    """下载并校验番茄封面候选，优先书封，失败再回退。"""
+    candidates = _fanqie_cover_candidates(txt, title)
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda u: (
+        0 if re.search(r"/p9-novel-sign", u) else (1 if "-novel-sign" in u else 2),
+        0 if "x-signature=" in u else 1,
+        0 if "novel-pic" in u else 1,
+    ))
+    for url in candidates:
+        try:
+            body = _download_image(url, referer="https://fanqienovel.com/", timeout=10)
+            if not body:
+                continue
+            size = _image_size(body)
+            if not size:
+                continue
+            width, height = size
+            if width < 150 or height < 200:
+                continue
+            return url
+        except Exception:
+            continue
+    return ""
+
+
 def parse_fanqie(book_id):
     url = f"https://fanqienovel.com/page/{book_id}"
     status, body, final, _ = http_get(url, headers={"Referer": "https://fanqienovel.com/"})
@@ -1038,9 +1625,10 @@ def parse_fanqie(book_id):
     if md:
         desc = strip_html(_unescape_js(md.group(1)))
     cover = ""
-    mcv = re.findall(r'(https://p3-reading[^"\s]+\.(?:jpeg|jpg|webp))', txt)
-    if mcv:
-        cover = mcv[0]
+    try:
+        cover = _pick_fanqie_cover(txt, title)
+    except Exception:
+        cover = ""
     words = ""
     mw = re.search(r'"wordNumber":(\d+)', txt)
     if mw:
@@ -1336,6 +1924,511 @@ def normalize_work(payload, existing=None):
     return w
 
 
+# ---------------------------------------------------------------- TMDB 剪贴板导入
+TMDB_JSON_LIMIT = 120000
+TMDB_IMPORT_MODES = ("merge", "overwrite")
+TMDB_DETAIL_RE = re.compile(
+    r"^https://(?:www\.)?themoviedb\.org/(movie|tv)/(\d+)(?:-[^/?#]*)?/?(?:\?language=zh-CN)?$",
+    re.I,
+)
+TMDB_IMAGE_HOSTS = ("image.tmdb.org", "media.themoviedb.org")
+TMDB_INFOBOX_KEYS = {
+    "条目类型", "首播日期", "上映日期", "国家/地区", "集数", "时长",
+    "IMDb ID", "TMDB ID", "评分", "评分人数",
+}
+
+
+def _tmdb_text(value, max_len, label, required=False):
+    """校验剪贴板里的文本字段，去掉 HTML 并限制长度。"""
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ValueError(f"{label}必须是文本")
+    value = strip_html(value).strip()
+    if len(value) > max_len:
+        raise ValueError(f"{label}过长（最多 {max_len} 字）")
+    if required and not value:
+        raise ValueError(f"{label}不能为空")
+    return value
+
+
+def _tmdb_detail_info(url):
+    """只接受 TMDB 的 movie/tv 数字 ID 详情页，返回规范化地址。"""
+    raw = str(url or "").strip()
+    if not raw:
+        raise ValueError("缺少 TMDB 来源地址")
+    if len(raw) > 500:
+        raise ValueError("TMDB 来源地址过长")
+    m = TMDB_DETAIL_RE.fullmatch(raw)
+    if not m:
+        raise ValueError("来源地址不是合法的 TMDB movie/tv 详情页")
+    kind = m.group(1).lower()
+    tid = m.group(2)
+    if not tid.isdigit() or int(tid) <= 0:
+        raise ValueError("TMDB 数字 ID 不合法")
+    canonical = f"https://www.themoviedb.org/{kind}/{tid}?language=zh-CN"
+    return kind, tid, canonical
+
+
+def _tmdb_cover_url(value):
+    """封面只允许 TMDB 官方图片域名，避免粘贴内容把服务端变成任意 URL 下载器。"""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("封面地址必须是文本")
+    raw = value.strip()
+    if not raw:
+        return ""
+    if len(raw) > 800:
+        raise ValueError("封面地址过长")
+    try:
+        u = urlparse(raw)
+    except Exception:
+        raise ValueError("封面地址不合法")
+    if u.scheme != "https" or (u.hostname or "").lower() not in TMDB_IMAGE_HOSTS:
+        raise ValueError("封面必须来自 TMDB 官方图片域名")
+    if not u.path.startswith("/t/p/") or u.query or u.fragment:
+        raise ValueError("封面地址不是 TMDB 图片路径")
+    return raw
+
+
+def _tmdb_string_list(value, max_items, max_len, label):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{label}必须是列表")
+    if len(value) > max_items:
+        raise ValueError(f"{label}条目过多")
+    out = []
+    for item in value:
+        text = _tmdb_text(item, max_len, label)
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _tmdb_creators(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("创作者必须是列表")
+    if len(value) > 60:
+        raise ValueError("创作者条目过多")
+    out = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("创作者条目结构不正确")
+        role = _tmdb_text(item.get("role"), 20, "创作者角色") or "创作者"
+        name = _tmdb_text(item.get("name"), 200, "创作者姓名", required=True)
+        if any(c.get("role") == role and c.get("name") == name for c in out):
+            continue
+        out.append({"role": role, "name": name})
+    return out
+
+
+def _tmdb_infobox(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("infobox 必须是列表")
+    if len(value) > 80:
+        raise ValueError("infobox 条目过多")
+    out = []
+    keys = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("infobox 条目结构不正确")
+        key = _tmdb_text(item.get("key"), 30, "infobox 键")
+        val = _tmdb_text(item.get("value"), 2000, "infobox 值")
+        if not key or not val:
+            continue
+        if key not in TMDB_INFOBOX_KEYS:
+            continue
+        if key in keys:
+            continue
+        keys.add(key)
+        out.append({"key": key, "value": val})
+    return out
+
+
+def _tmdb_rating_ref(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("TMDB 评分格式不正确")
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("TMDB 评分格式不正确")
+    if score < 0 or score > 10:
+        raise ValueError("TMDB 评分超出范围")
+    return round(score, 1)
+
+
+def validate_tmdb_payload(raw):
+    """解析并校验 Bookmarklet 输出，返回干净、可保存的 TMDB 草稿。"""
+    if isinstance(raw, dict):
+        obj = raw
+        try:
+            size = len(json.dumps(obj, ensure_ascii=False))
+        except Exception:
+            size = TMDB_JSON_LIMIT + 1
+        if size > TMDB_JSON_LIMIT:
+            raise ValueError("粘贴内容过长")
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raise ValueError("请先粘贴 TMDB JSON")
+        if len(text) > TMDB_JSON_LIMIT:
+            raise ValueError("粘贴内容过长")
+        try:
+            obj = json.loads(text)
+        except Exception:
+            raise ValueError("JSON 格式不正确")
+    else:
+        raise ValueError("粘贴内容必须是 JSON 文本")
+    if not isinstance(obj, dict):
+        raise ValueError("JSON 顶层必须是对象")
+
+    src = obj.get("source")
+    if not isinstance(src, dict):
+        raise ValueError("缺少 source 对象")
+    name = str(src.get("name") or "").strip()
+    if name != "tmdb":
+        raise ValueError("source.name 必须是 tmdb")
+    kind, tid, canonical = _tmdb_detail_info(src.get("url"))
+    src_kind = str(src.get("type") or "").strip().lower()
+    src_id = str(src.get("id") or "").strip()
+    if src_kind and src_kind != kind:
+        raise ValueError("source.type 与来源 URL 不一致")
+    if src_id and src_id != tid:
+        raise ValueError("source.id 与来源 URL 不一致")
+
+    category = obj.get("category")
+    if category and category != "movie":
+        raise ValueError("TMDB 资料只能导入影视剧分类")
+
+    title = _tmdb_text(obj.get("title"), 200, "标题", required=True)
+    original_title = _tmdb_text(obj.get("originalTitle"), 200, "原始标题")
+    year = str(obj.get("year") or "").strip()
+    if year and not re.fullmatch(r"(19|20)\d{2}", year):
+        raise ValueError("年份格式不正确")
+    aliases = _tmdb_string_list(obj.get("aliases"), 20, 200, "别名")
+    tags = _tmdb_string_list(obj.get("tags"), 40, 40, "标签")
+    summary = _tmdb_text(obj.get("summary"), 20000, "简介")
+    creators = _tmdb_creators(obj.get("creators"))
+    infobox = _tmdb_infobox(obj.get("infobox"))
+    cover_url = _tmdb_cover_url(obj.get("coverUrl"))
+    rating_ref = _tmdb_rating_ref(obj.get("ratingRef"))
+
+    return {
+        "category": "movie",
+        "title": title,
+        "originalTitle": original_title,
+        "aliases": aliases,
+        "year": year,
+        "tags": tags,
+        "summary": summary,
+        "creators": creators,
+        "infobox": infobox,
+        "source": {
+            "name": "tmdb",
+            "label": "TMDB",
+            "type": kind,
+            "id": tid,
+            "url": canonical,
+        },
+        "coverUrl": cover_url,
+        "previewUrl": image_proxy_url(cover_url) if cover_url else "",
+        "coverReferer": canonical,
+        # TMDB 图片在部分网络下直连超时，保存时允许先走本机代理再回退直连。
+        "coverProxy": True,
+        "ratingRef": rating_ref,
+    }
+
+
+def _tmdb_work_identity(work):
+    src = (work or {}).get("source")
+    if not isinstance(src, dict) or src.get("name") != "tmdb":
+        return None
+    kind = str(src.get("type") or "").strip().lower()
+    tid = str(src.get("id") or "").strip()
+    if kind not in ("movie", "tv") or not tid.isdigit():
+        try:
+            kind, tid, _ = _tmdb_detail_info(src.get("url"))
+        except ValueError:
+            return None
+    return kind, tid
+
+
+def _tmdb_work_brief(work):
+    if not work:
+        return None
+    return {
+        "id": work.get("id"),
+        "title": work.get("title") or "",
+        "year": work.get("year") or "",
+        "category": work.get("category") or "",
+        "source": {
+            "name": (work.get("source") or {}).get("name") or "",
+            "label": (work.get("source") or {}).get("label") or "",
+            "type": (work.get("source") or {}).get("type") or "",
+            "id": (work.get("source") or {}).get("id") or "",
+        },
+        "coverUrl": ("/" + work["cover"]).replace("//", "/") if work.get("cover") else "",
+    }
+
+
+def _tmdb_norm_title(value):
+    return re.sub(r"\W+", "", str(value or "")).lower()
+
+
+def _tmdb_find_targets(lib, draft, target_id=None):
+    works = lib.get("works") or []
+    target = None
+    if target_id:
+        target = next((w for w in works if str(w.get("id")) == str(target_id)), None)
+        if not target:
+            raise ValueError("要导入的作品不存在")
+        if target.get("category") != "movie":
+            raise ValueError("只能向影视剧作品导入 TMDB 资料")
+    identity = (draft["source"]["type"], str(draft["source"]["id"]))
+    match = next((w for w in works if _tmdb_work_identity(w) == identity), None)
+    title_matches = []
+    norm = _tmdb_norm_title(draft["title"])
+    if norm:
+        for w in works:
+            if w.get("category") != "movie":
+                continue
+            if _tmdb_norm_title(w.get("title")) != norm:
+                continue
+            if _tmdb_work_identity(w) == identity:
+                continue
+            title_matches.append(w)
+            if len(title_matches) >= 5:
+                break
+    return target, match, title_matches
+
+
+def _tmdb_preview_response(lib, draft, target_id=None):
+    target, match, title_matches = _tmdb_find_targets(lib, draft, target_id)
+    warnings = []
+    if target:
+        current_identity = _tmdb_work_identity(target)
+        if current_identity and current_identity != (draft["source"]["type"], str(draft["source"]["id"])):
+            warnings.append("当前作品已有的 TMDB 身份与粘贴资料不一致；仅补空不会覆盖，覆盖模式会替换 TMDB 字段。")
+        elif not current_identity:
+            warnings.append("当前作品不是 TMDB 来源；仅补空不会覆盖，覆盖模式会把来源和资料改为 TMDB。")
+    if match and (not target or match.get("id") != target.get("id")):
+        warnings.append("库中已有相同 TMDB 条目，确认后会更新该作品，不会新建重复条目。")
+    if title_matches and not target:
+        warnings.append("存在同名但 TMDB ID 不同的作品；本次不会按标题合并，会新建独立条目。")
+    action = "update" if (target or match) else "create"
+    return {
+        "draft": draft,
+        "identity": {"type": draft["source"]["type"], "id": draft["source"]["id"]},
+        "target": _tmdb_work_brief(target),
+        "match": _tmdb_work_brief(match),
+        "titleMatches": [_tmdb_work_brief(w) for w in title_matches],
+        "action": action,
+        "warnings": warnings,
+    }
+
+
+def _tmdb_merge_infobox(existing, incoming):
+    """已有非空字段优先；只补充已有 infobox 缺失的 key。"""
+    result = []
+    keys = set()
+    for item in existing or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        val = str(item.get("value") or "").strip()
+        if key and val:
+            result.append({"key": key, "value": val})
+            keys.add(key)
+    for item in incoming or []:
+        key = item.get("key")
+        val = item.get("value")
+        if key and val and key not in keys:
+            result.append({"key": key, "value": val})
+            keys.add(key)
+    return result
+
+
+def _tmdb_merge_work(work, draft):
+    """已有作品只补空字段；已有封面、简介、标签、创作者、别名等均不覆盖。"""
+    existing = dict(work)
+    payload = dict(existing)
+    payload["category"] = "movie"
+    if not (existing.get("title") or "").strip():
+        payload["title"] = draft["title"]
+    if not (existing.get("originalTitle") or "").strip():
+        payload["originalTitle"] = draft["originalTitle"]
+    if not existing.get("aliases"):
+        payload["aliases"] = draft["aliases"]
+    if not (existing.get("year") or "").strip():
+        payload["year"] = draft["year"]
+    if not existing.get("tags"):
+        payload["tags"] = draft["tags"]
+    if not (existing.get("summary") or "").strip():
+        payload["summary"] = draft["summary"]
+    if not existing.get("creators"):
+        payload["creators"] = draft["creators"]
+    payload["infobox"] = _tmdb_merge_infobox(existing.get("infobox"), draft["infobox"])
+    if not existing.get("source"):
+        payload["source"] = draft["source"]
+    if not existing.get("cover") and draft.get("coverUrl"):
+        # payload 里如果还留着 cover=""，normalize_work() 会优先用空封面并跳过 coverUrl。
+        payload.pop("cover", None)
+        payload["coverUrl"] = draft["coverUrl"]
+        payload["coverReferer"] = draft.get("coverReferer")
+        payload["coverProxy"] = True
+    return normalize_work(payload, existing=existing)
+
+
+def _tmdb_overwrite_infobox(existing, incoming):
+    """覆盖模式下用 TMDB 的非空 infobox 替换同名 key，保留用户自定义的其他 key。"""
+    result = []
+    positions = {}
+    for item in existing or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        val = str(item.get("value") or "").strip()
+        if key and val:
+            positions[key] = len(result)
+            result.append({"key": key, "value": val})
+    for item in incoming or []:
+        key = str(item.get("key") or "").strip()
+        val = str(item.get("value") or "").strip()
+        if not key or not val:
+            continue
+        if key in positions:
+            result[positions[key]] = {"key": key, "value": val}
+        else:
+            positions[key] = len(result)
+            result.append({"key": key, "value": val})
+    return result
+
+
+def _tmdb_overwrite_work(work, draft):
+    """覆盖模式：用 TMDB 的非空字段替换已有字段，保留评分、经历、系列和用户字段。"""
+    existing = dict(work)
+    old_cover = existing.get("cover") or ""
+    payload = dict(existing)
+    payload["category"] = "movie"
+    payload["title"] = draft["title"]
+    for field in ("originalTitle", "year", "summary"):
+        incoming = draft.get(field)
+        payload[field] = incoming if incoming else (existing.get(field) or "")
+    for field in ("aliases", "tags", "creators"):
+        incoming = draft.get(field)
+        payload[field] = incoming if incoming else (existing.get(field) or [])
+    payload["infobox"] = _tmdb_overwrite_infobox(existing.get("infobox"), draft["infobox"])
+    payload["source"] = draft["source"]
+    if draft.get("coverUrl"):
+        # 覆盖封面时必须移除旧的本地 cover，否则 normalize_work() 不会下载新图。
+        payload.pop("cover", None)
+        payload["coverUrl"] = draft["coverUrl"]
+        payload["coverReferer"] = draft.get("coverReferer")
+        payload["coverProxy"] = True
+    result = normalize_work(payload, existing=existing)
+    # 新封面下载失败时保留旧封面，避免“覆盖”把已有图清空。
+    if not result.get("cover") and old_cover:
+        result["cover"] = old_cover
+    return result
+
+
+def _tmdb_apply_overrides(draft, overrides):
+    """只接受表单里允许编辑的字段，服务端仍按同样规则复核。"""
+    if not overrides:
+        return draft
+    if not isinstance(overrides, dict):
+        raise ValueError("overrides 结构不正确")
+    allowed = {"title", "originalTitle", "year", "tags", "summary", "creators"}
+    unknown = [k for k in overrides.keys() if k not in allowed]
+    if unknown:
+        raise ValueError("overrides 包含不允许的字段")
+    if "title" in overrides:
+        draft["title"] = _tmdb_text(overrides.get("title"), 200, "标题", required=True)
+    if "originalTitle" in overrides:
+        draft["originalTitle"] = _tmdb_text(overrides.get("originalTitle"), 200, "原始标题")
+    if "year" in overrides:
+        year = str(overrides.get("year") or "").strip()
+        if year and not re.fullmatch(r"(19|20)\d{2}", year):
+            raise ValueError("年份格式不正确")
+        draft["year"] = year
+    if "tags" in overrides:
+        draft["tags"] = _tmdb_string_list(overrides.get("tags"), 40, 40, "标签")
+    if "summary" in overrides:
+        draft["summary"] = _tmdb_text(overrides.get("summary"), 20000, "简介")
+    if "creators" in overrides:
+        draft["creators"] = _tmdb_creators(overrides.get("creators"))
+    return draft
+
+
+def _tmdb_first_experience(value):
+    if not isinstance(value, dict):
+        raise ValueError("firstExperience 结构不正确")
+    status = str(value.get("status") or "planned")
+    if status not in STATUS_ORDER:
+        raise ValueError("firstExperience.status 不合法")
+    content = _tmdb_text(value.get("content"), 2000, "第一条经历")
+    date = value.get("date")
+    if date:
+        date = _tmdb_text(date, 10, "经历日期")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            raise ValueError("经历日期格式不正确")
+    return {"date": date or datetime.now().strftime("%Y-%m-%d"),
+            "status": status, "content": content}
+
+
+def import_tmdb_work(raw, target_id=None, overrides=None, rating=None, first_experience=None, mode="merge"):
+    """校验并保存 TMDB 资料；mode=merge 只补空，mode=overwrite 覆盖 TMDB 字段。"""
+    mode = str(mode or "merge").strip().lower()
+    if mode not in TMDB_IMPORT_MODES:
+        raise ValueError("导入方式不正确")
+    draft = validate_tmdb_payload(raw)
+    if overrides:
+        draft = _tmdb_apply_overrides(draft, overrides)
+    else:
+        # 原始标题、年份等即使表单未提交，也保持从剪贴板校验后的值
+        draft = dict(draft)
+    with _lock:
+        lib = load_library()
+        target, match, _ = _tmdb_find_targets(lib, draft, target_id)
+        existing = target or match
+        if existing:
+            if mode == "overwrite":
+                merged = _tmdb_overwrite_work(existing, draft)
+            else:
+                merged = _tmdb_merge_work(existing, draft)
+            works = lib.get("works") or []
+            for i, w in enumerate(works):
+                if str(w.get("id")) == str(existing.get("id")):
+                    works[i] = merged
+                    break
+            save_library(lib)
+            return "updated", merged
+        work = normalize_work(dict(draft))
+        if rating not in (None, ""):
+            try:
+                score = float(rating)
+            except (TypeError, ValueError):
+                raise ValueError("初始评分格式不正确")
+            if score < 0 or score > 10:
+                raise ValueError("初始评分超出范围")
+            work["rating"] = round(score * 2) / 2
+            work["ratingHistory"] = [{"date": datetime.now().strftime("%Y-%m-%d"),
+                                      "score": work["rating"], "reason": "导入初评"}]
+        if first_experience:
+            work["experiences"] = [_tmdb_first_experience(first_experience)]
+        (lib.setdefault("works", [])).append(work)
+        save_library(lib)
+        return "created", work
+
+
 def effective_experience(work):
     """当前状态由『经历日期』最新的一条决定，而不是最后添加的那条。
     同一天有多条时，按添加先后，后加的算更新。"""
@@ -1577,6 +2670,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_search(body)
             if p == "/api/resolve":
                 return self.handle_resolve(body)
+            if p == "/api/tmdb/preview":
+                return self.handle_tmdb_preview(body)
+            if p == "/api/tmdb/import":
+                return self.handle_tmdb_import(body)
             if p == "/api/link":
                 cat = body.get("category")
                 draft = parse_link(body.get("url") or "", cat)
@@ -1710,8 +2807,8 @@ class Handler(BaseHTTPRequestHandler):
         if not kw:
             return self.send_json({"ok": False, "error": "请输入关键词"}, 400)
         fn = {"bangumi": bangumi_search, "douban": douban_search, "weread": weread_search,
-              "steam": steam_search, "bilibili": bilibili_search, "anilist": anilist_search,
-              "web": web_search, "hongguo": hongguo_search}.get(source)
+              "steam": steam_search, "bilibili": bilibili_search, "cinemeta": cinemeta_search,
+              "anilist": anilist_search, "web": web_search, "hongguo": hongguo_search}.get(source)
         if not fn:
             return self.send_json({"ok": False, "error": "未知来源"}, 400)
         try:
@@ -1729,8 +2826,8 @@ class Handler(BaseHTTPRequestHandler):
         ref = body.get("ref") or {}
         category = body.get("category")
         fn = {"bangumi": bangumi_draft, "douban": douban_draft, "weread": weread_draft,
-              "steam": steam_draft, "bilibili": bilibili_draft, "anilist": anilist_draft,
-              "hongguo": hongguo_draft}.get(source)
+              "steam": steam_draft, "bilibili": bilibili_draft, "cinemeta": cinemeta_draft,
+              "anilist": anilist_draft, "hongguo": hongguo_draft}.get(source)
         if not fn:
             return self.send_json({"ok": False, "error": "未知来源"}, 400)
         try:
@@ -1739,6 +2836,43 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 200)
         draft["_ready"] = True
         return self.send_json({"ok": True, "draft": draft})
+
+    def handle_tmdb_preview(self, body):
+        """只校验并返回预览，不写作品库。"""
+        target_id = body.get("targetId")
+        if target_id is not None and not isinstance(target_id, (str, int)):
+            return self.send_json({"ok": False, "error": "targetId 不合法"}, 400)
+        try:
+            draft = validate_tmdb_payload(body.get("json"))
+            with _lock:
+                lib = load_library()
+                preview = _tmdb_preview_response(lib, draft, str(target_id) if target_id else None)
+            preview["ok"] = True
+            return self.send_json(preview)
+        except ValueError as e:
+            return self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def handle_tmdb_import(self, body):
+        """确认后保存：同 TMDB 身份更新已有作品，否则新建；不按标题合并。"""
+        target_id = body.get("targetId")
+        if target_id is not None and not isinstance(target_id, (str, int)):
+            return self.send_json({"ok": False, "error": "targetId 不合法"}, 400)
+        try:
+            action, work = import_tmdb_work(
+                body.get("json"),
+                target_id=str(target_id) if target_id else None,
+                overrides=body.get("overrides"),
+                rating=body.get("rating"),
+                first_experience=body.get("firstExperience"),
+                mode=body.get("mode") or "merge",
+            )
+        except ValueError as e:
+            return self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+        return self.send_json({"ok": True, "action": action, "work": work_view(work)})
 
     def handle_create(self, body):
         draft = body.get("draft") or body
