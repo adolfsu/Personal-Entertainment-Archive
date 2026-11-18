@@ -42,7 +42,7 @@ const S = {
   drawerRating: 8, seriesRating: 8,
   add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, youshuRaw: "", youshuPreview: null, youshuApplied: null },
   seriesDraft: { mode: "create", attachTo: null },
-  backups: [],
+  backups: [], undoAvailable: false, dataState: "normal",
 };
 
 /* ------------------------------------------------------------ 外观（明暗 / 主题） */
@@ -149,6 +149,22 @@ function esc(s) {
 }
 function fmtScore(v) { return (v == null || v === "") ? "" : Number(v).toFixed(1); }
 
+/* 版本号展示：有效版本显示 v1.2.3，读不到时显示「版本未标注」而不是「v未标注」。 */
+function versionText(v) {
+  const s = String(v == null ? "" : v).trim();
+  return (s && s !== "未标注") ? `v${s}` : "版本未标注";
+}
+
+/* 设置面板里的「需要重启」提示：区分「版本号变了」和「版本号文件读不出来」两种情况。 */
+function versionStaleNote() {
+  if (!S.versionStale) return "";
+  const fileLabel = versionText(S.versionFile);
+  const tip = fileLabel === "版本未标注"
+    ? "项目目录里的 VERSION 文件缺失或格式不正确，重启程序后会显示「版本未标注」"
+    : `项目目录里的 VERSION 已是 ${fileLabel}，重启程序后才会生效`;
+  return `<div class="muted-note" style="margin-top:6px;color:var(--lenso-system-orange)">${esc(tip)}</div>`;
+}
+
 function externalSearchUrl(platform, keyword) {
   return platform.template.replace("{q}", encodeURIComponent(keyword));
 }
@@ -158,13 +174,34 @@ function externalSearchLinksHTML(platforms, keyword) {
   return platforms.map(p => `<a class="source-tab external-search-link" href="${esc(externalSearchUrl(p, keyword))}" target="_blank" rel="noopener noreferrer" aria-label="在 ${esc(p.label)} 搜索 ${esc(keyword)}">${ICONS.search}<span>${esc(p.label)}</span></a>`).join("");
 }
 
+const UNDOABLE_PATH = /^\/api\/(works|series|import|import-records)(\/|$)/;
+
 async function api(path, opts = {}) {
   const o = { headers: { "Content-Type": "application/json" } };
   if (opts.method) o.method = opts.method;
   if (opts.body) o.body = JSON.stringify(opts.body);
   const res = await fetch(path, o);
   const text = await res.text();
-  try { return JSON.parse(text); } catch (e) { return { ok: false, error: "响应解析失败" }; }
+  let out;
+  try { out = JSON.parse(text); } catch (e) { return { ok: false, error: "响应解析失败" }; }
+  syncUndoState(path, (o.method || "GET").toUpperCase(), out);
+  return out;
+}
+
+/* 任何成功的写操作都会生成写前快照，撤销按钮必须立刻可用；
+   撤销接口自己返回 remaining，清空数据会删掉快照。这里统一维护，避免各页面漏更新。 */
+function syncUndoState(path, method, res) {
+  if (!res || res.ok === false) return;
+  if (method !== "GET" && UNDOABLE_PATH.test(path)) {
+    S.undoAvailable = true;
+  } else if (path === "/api/undo" && typeof res.remaining === "number") {
+    S.undoAvailable = res.remaining > 0;
+  } else if (path === "/api/clear-data") {
+    S.undoAvailable = false;
+  } else {
+    return;
+  }
+  updateUndoBtn();
 }
 
 let toastTimer = null;
@@ -180,19 +217,26 @@ function toast(msg, isErr) {
 /* ------------------------------------------------------------ 初始化 */
 async function boot() {
   const data = await api("/api/bootstrap");
-  if (!data || !data.works) { toast("无法连接本地服务，请确认 server.py 正在运行", true); return; }
+  if (!data || !Array.isArray(data.works)) { toast("无法连接本地服务，请确认 server.py 正在运行", true); return; }
   S.works = data.works;
   S.series = data.series || [];
   S.seriesKinds = data.seriesKinds || {};
   S.seriesRoles = data.seriesRoles || {};
   S.settings = data.settings || {};
-  S.version = data.version || "";
+  S.version = data.version || "未标注";
+  S.versionFile = data.versionFile || "";
+  S.versionStale = Boolean(data.versionStale);
+  S.dataState = data.dataState || "normal";
+  S.undoAvailable = Boolean(data.undoAvailable);
+  S.backups = data.backups || [];
   const sub = el("#brandSub");
-  if (sub && S.version) sub.textContent = `PERSONAL ARCHIVE · v${S.version}`;
-  if (S.version) document.title = `娱乐档案 v${S.version} · 个人档案馆`;
+  if (sub) sub.textContent = `PERSONAL ARCHIVE · ${versionText(S.version)}`;
+  document.title = `娱乐档案 ${versionText(S.version)} · 个人档案馆`;
   S.categories = data.categories || [];
   S.sourceLabels = data.sourceLabels || {};
   window.__proxy = data.proxyActive || "未探测到可用代理";
+  updateUndoBtn();
+  if (S.dataState === "corrupt") { showCorrupt(data); return; }
   renderTabs();
   renderStatusChips();
   renderWall();
@@ -200,11 +244,84 @@ async function boot() {
   bindGlobal();
 }
 
+/* 主档案损坏：挡住所有操作，只留「从备份恢复」和「新建空档案」两条路 */
+function showCorrupt(data) {
+  const box = el("#corruptBlock");
+  if (!box) return;
+  const f = data.corruptFile || {};
+  el("#corruptText").textContent =
+    `原因：${data.dataError || "无法读取"}\n` +
+    `文件：${f.name || "library.json"}${f.mtime ? " · 修改于 " + f.mtime : ""}` +
+    (f.size ? ` · ${(f.size / 1024).toFixed(0)} KB` : "") +
+    `\n原文件已完整保留，程序没有覆盖它，也不会在恢复前写入任何数据。`;
+  const backups = (data.backups || []);
+  const list = el("#corruptBackups");
+  list.innerHTML = backups.length
+    ? backups.map(b => `<div class="backup-row">
+        <span class="b-kind">${esc(b.label || "备份")}</span>
+        <span class="b-time">${esc(b.time)}</span>
+        <span class="b-size">${(b.size / 1024).toFixed(0)} KB</span>
+        <button class="btn btn-sm btn-primary" data-crestore="${esc(b.name)}" data-ckind="${esc(b.kind)}">恢复</button>
+      </div>`).join("")
+    : `<div class="muted-note">没有找到可用备份。可以先把 data\\library.json 拷出来手动修复，或确认后新建空档案。</div>`;
+  elAll("[data-crestore]", list).forEach(x => x.onclick = async () => {
+    x.disabled = true;
+    const ok = await restoreBackup(x.dataset.ckind, x.dataset.crestore);
+    x.disabled = false;
+    if (ok) location.reload();
+  });
+  el("#corruptRetry").onclick = () => location.reload();
+  el("#corruptNewBtn").onclick = async () => {
+    if (!confirm("这会保留损坏文件（另存为 library.corrupt-时间.json），然后新建一份空档案。确定？")) return;
+    const word = prompt("请输入「新建空档案」四个字以确认：");
+    if (word !== "新建空档案") return toast("确认内容不匹配，已取消", true);
+    const r = await api("/api/recover/new-start", { method: "POST", body: { confirm: "新建空档案" } });
+    if (!r.ok) return toast(r.error || "操作失败", true);
+    toast(`已新建空档案，损坏文件保留为 ${r.corruptCopy}`);
+    setTimeout(() => location.reload(), 800);
+  };
+  box.hidden = false;
+}
+
+function updateUndoBtn() {
+  const btn = el("#undoBtn");
+  if (!btn) return;
+  btn.disabled = !S.undoAvailable || S.dataState === "corrupt";
+  btn.title = btn.disabled ? "没有可撤销的操作" : "撤销上一步";
+}
+
+async function doUndo() {
+  if (!S.undoAvailable) return toast("没有可撤销的操作", true);
+  const r = await api("/api/undo", { method: "POST", body: {} });
+  if (!r.ok) return toast(r.error || "撤销失败", true);
+  toast(`已撤销上一步，当前 ${r.works} 部作品`);
+  await reloadAll();
+}
+
+/* 恢复备份的完整流程：预览数量差异和风险 → 用户确认 → 恢复 */
+async function restoreBackup(kind, name) {
+  const p = await api("/api/backups/preview", { method: "POST", body: { kind, name } });
+  if (!p.ok) { toast(p.error || "备份不可用", true); return false; }
+  const cur = p.current || {}, st = p.stats || {};
+  let msg = `备份内容：${st.works} 部作品 / ${st.series} 个系列\n当前档案：${cur.works} 部作品 / ${cur.series} 个系列`;
+  if (p.warnings && p.warnings.length) msg += `\n\n注意：\n· ${p.warnings.join("\n· ")}`;
+  msg += "\n\n恢复前会自动保存当前状态的安全快照。确定恢复这个备份？";
+  if (!confirm(msg)) return false;
+  const r = await api("/api/backups/restore", { method: "POST", body: { kind, name, confirm: "恢复" } });
+  if (!r.ok) { toast(r.error || "恢复失败", true); return false; }
+  toast(`已恢复：${r.count} 部作品，安全快照 ${r.safety || "已保存"}`);
+  return true;
+}
+
 async function reloadAll() {
   const b = await api("/api/bootstrap");
-  if (!b || !b.works) return;
+  if (!b || !Array.isArray(b.works)) return;
   S.works = b.works;
   S.series = b.series || [];
+  S.undoAvailable = Boolean(b.undoAvailable);
+  S.dataState = b.dataState || "normal";
+  S.backups = b.backups || [];
+  updateUndoBtn();
   renderTabs(); renderStatusChips(); renderWall(); renderStats();
 }
 
@@ -952,18 +1069,11 @@ function supportsUnifiedBookmarklet(category) {
 function tmdbImportHTML(a) {
   if (!a || !supportsUnifiedBookmarklet(a.category)) return "";
   const isMovie = a.category === "movie";
-  const previewLabel = isMovie ? "预览资料" : "识别资料";
-  const placeholder = isMovie
-    ? "在这里粘贴 TMDB 或优书网书签生成的 JSON"
-    : "在这里粘贴优书网书签生成的 JSON";
-  const importNote = isMovie
-    ? "TMDB 会进入现有预览流程；优书网资料请到网文编辑页导入"
-    : "优书网资料会先预览，确认后填入表单；保存仍需手动点击";
   return `
     <div class="tmdb-import" id="tmdbImportBox">
       <div class="refill-head">
         <h4>统一资料书签</h4>
-        <span class="hint">${isMovie ? "在 TMDB 详情页点击书签复制 JSON，粘贴到这里预览并导入。" : "在优书网详情页点击书签复制 JSON，粘贴到这里识别、预览，确认后填入下方表单。"}</span>
+        <span class="hint">在 ${isMovie ? "TMDB" : "优书网"} 详情页点击书签复制 JSON，粘贴到下方输入框即可自动识别并预览。</span>
       </div>
       <div class="tmdb-bookmark-note">
         <div class="tmdb-bookmark-title"><b>书签：导入个人娱乐档案</b><span>一个书签同时支持 TMDB 与优书网详情页。</span></div>
@@ -973,15 +1083,9 @@ function tmdbImportHTML(a) {
           <span class="tmdb-search-hint" id="tmdbSearchHint">当前没有标题，请先在搜索框输入作品标题</span>` : `<a class="btn btn-ghost btn-sm tmdb-search-link is-disabled" id="youshuSearchLink" target="_blank" rel="noopener noreferrer" aria-disabled="true">前往优书网搜索</a>
           <span class="tmdb-search-hint" id="youshuSearchHint">当前没有标题，请先在搜索框输入作品标题</span>`}
         </div>
-        <div class="tmdb-bookmark-help">Chrome / Edge：右键书签栏 → 添加网页；名称填「导入个人娱乐档案」，网址粘贴刚复制的脚本。之后在 TMDB 或优书网详情页点击该书签即可。</div>
+        <div class="tmdb-bookmark-help">Chrome / Edge：右键书签栏 → 添加网页；名称填「导入个人娱乐档案」，网址粘贴刚复制的脚本。之后在 TMDB 或优书网详情页点击该书签，回到这里把复制到的 JSON 粘进输入框。</div>
       </div>
-      <textarea id="tmdbJson" class="reason tmdb-json" spellcheck="false" placeholder="${esc(placeholder)}">${esc(a.tmdbRaw || "")}</textarea>
-      <div class="tmdb-actions">
-        <button class="btn btn-primary btn-sm" id="tmdbPreviewBtn">${previewLabel}</button>
-        <button class="btn btn-ghost btn-sm" id="tmdbClearBtn">清空</button>
-        <span class="tmdb-import-note">${esc(importNote)}</span>
-      </div>
-      <div class="tmdb-preview" id="tmdbPreview">${a.tmdbPreview ? tmdbPreviewHTML(a) : ""}</div>
+      <div class="tmdb-preview" id="tmdbPreview">${a.tmdbPreview ? tmdbPreviewHTML(a) : (a.youshuPreview ? youshuPreviewHTML(a) : "")}</div>
     </div>`;
 }
 
@@ -1303,24 +1407,8 @@ function bindTmdbPreview(a) {
 function bindTmdbImport(a) {
   const box = el("#tmdbImportBox");
   if (!box) return;
-  const preview = el("#tmdbPreviewBtn");
-  const clear = el("#tmdbClearBtn");
   const copyBookmark = el("#tmdbCopyBookmarklet");
-  if (preview) preview.onclick = previewTmdb;
   if (copyBookmark) copyBookmark.onclick = copyImportBookmarklet;
-  if (clear) clear.onclick = () => {
-    a.tmdbRaw = "";
-    a.tmdbPreview = null;
-    a.youshuRaw = "";
-    a.youshuPreview = null;
-    a.youshuApplied = null;
-    const input = el("#tmdbJson");
-    if (input) input.value = "";
-    const out = el("#tmdbPreview");
-    if (out) out.innerHTML = "";
-    syncTmdbSearchLink(a);
-    syncYoushuSearchLink(a);
-  };
   ["#fTitle", "#rfKeyword", "#addKeyword"].forEach(selector => {
     const input = el(selector);
     if (input) input.addEventListener("input", () => {
@@ -1330,7 +1418,8 @@ function bindTmdbImport(a) {
   });
   syncTmdbSearchLink(a);
   syncYoushuSearchLink(a);
-  bindTmdbPreview(a);
+  if (a.tmdbPreview) bindTmdbPreview(a);
+  if (a.youshuPreview) bindYoushuPreview(a);
 }
 
 function pasteSourceInfo(raw) {
@@ -1351,13 +1440,10 @@ function showPasteNotice(message) {
 
 async function previewYoushu(raw) {
   const a = S.add;
-  const btn = el("#tmdbPreviewBtn");
-  if (btn) { btn.disabled = true; btn.textContent = "识别中…"; }
   const r = await api("/api/youshu/preview", {
     method: "POST",
     body: { json: raw, targetId: a.mode === "edit" ? a.editId : null },
   });
-  if (btn) { btn.disabled = false; btn.textContent = "识别资料"; }
   if (!r.ok) {
     a.youshuRaw = "";
     a.youshuPreview = null;
@@ -1376,9 +1462,9 @@ async function previewYoushu(raw) {
   bindYoushuPreview(a);
 }
 
-async function previewTmdb() {
+async function previewTmdb(raw) {
   const a = S.add;
-  const raw = (el("#tmdbJson").value || "").trim();
+  raw = (raw || "").trim();
   if (!raw) return toast("请先粘贴资料 JSON", true);
   const sourceInfo = pasteSourceInfo(raw);
   const sourceName = sourceInfo ? sourceInfo.name : "";
@@ -1410,13 +1496,10 @@ async function previewTmdb() {
     return toast("当前分类不支持剪贴板资料导入", true);
   }
 
-  const btn = el("#tmdbPreviewBtn");
-  if (btn) { btn.disabled = true; btn.textContent = "校验中…"; }
   const r = await api("/api/tmdb/preview", {
     method: "POST",
     body: { json: raw, targetId: a.mode === "edit" ? a.editId : null },
   });
-  if (btn) { btn.disabled = false; btn.textContent = "预览资料"; }
   if (!r.ok) {
     a.tmdbPreview = null;
     a.tmdbRaw = "";
@@ -1556,7 +1639,7 @@ function renderAdd() {
       </div>
       ${a.source === "web" ? `<div class="tip">网文兜底：先用必应定位起点 / 番茄的官方书页，再解析。命中不了就直接粘贴链接。</div>` : ""}
       <div class="link-row">
-        <input id="addLink" placeholder="或粘贴作品链接：qidian.com/book/… / fanqienovel.com/page/… / ciweimao.com/book/…">
+        <input id="addLink" placeholder="粘贴作品链接或书签 JSON（qidian / fanqienovel / ciweimao / douban / bangumi / steam / TMDB / 优书网）">
         <button class="btn" id="parseLink">解析</button>
       </div>
       <div class="results" id="addResults"></div>`;
@@ -1620,13 +1703,44 @@ async function pickItem(i) {
 }
 
 async function doParseLink() {
-  const url = (el("#addLink").value || "").trim();
-  if (!url) return toast("请粘贴链接", true);
+  const input = (el("#addLink").value || "").trim();
+  if (!input) return toast("请粘贴链接或书签 JSON", true);
+  if (input.charAt(0) === "{" || input.charAt(0) === "[") {
+    return importJsonInput(input, { refill: false });
+  }
   const btn = el("#parseLink"); btn.disabled = true; btn.textContent = "解析中…";
-  const r = await api("/api/link", { method: "POST", body: { url, category: S.add.category } });
+  const r = await api("/api/web-import", { method: "POST", body: { input, category: S.add.category } });
   btn.disabled = false; btn.textContent = "解析";
   if (!r.ok || !r.draft) return toast(r.error || "解析失败", true);
   S.add.draft = r.draft; S.add.step = 3; renderAdd();
+  if (r.warnings && r.warnings.length) toast(`${r.sourceLabel || "导入"}：${r.warnings.join("；")}`, true);
+  else toast(`${r.sourceLabel || "导入"}：已识别，请核对字段`);
+}
+
+/* 书签 JSON 与网址共用输入框后的统一分流：TMDB / 优书网走原有预览流程，
+   其它合法草稿 JSON 走通用导入，保持原有能力不变。 */
+async function importJsonInput(raw, opts = {}) {
+  const info = pasteSourceInfo(raw);
+  const name = info ? info.name : "";
+  const a = S.add;
+  if (!info) {
+    return toast("JSON 格式不正确，请重新复制书签内容", true);
+  }
+  if (name === "tmdb" || (!name && (info.draft.tmdbId || info.draft.mediaType))) {
+    if (a.category !== "movie") return toast("已识别 TMDB 资料，请到影视作品编辑页导入", true);
+    return previewTmdb(raw);
+  }
+  if (name === "youshu" || (!name && info.draft.youshuId)) {
+    if (a.category !== "novel") return toast("已识别优书网资料，请到网文作品编辑页导入", true);
+    return previewYoushu(raw);
+  }
+  if (opts.refill) return toast("重新获取信息只支持 TMDB / 优书网书签 JSON；通用 JSON 请用「导入备份」", true);
+  const r = await api("/api/web-import", { method: "POST", body: { input: raw, category: a.category } });
+  if (!r.ok || !r.draft) return toast(r.error || "解析失败", true);
+  a.draft = r.draft;
+  a.step = 3;
+  renderAdd();
+  toast(`${r.sourceLabel || "通用草稿"}：已识别，请核对字段`);
 }
 
 function renderForm() {
@@ -1696,7 +1810,7 @@ function renderForm() {
         <div class="source-row external-search-platforms" id="externalSearchPlatforms" style="${extTitle ? "" : "display:none"}">${externalSearchLinksHTML(extPlatforms, extTitle)}</div>
       </div>` : ""}
       <div class="link-row">
-        <input id="rfLink" placeholder="或粘贴作品链接：起点 / 番茄 / 豆瓣图书 / Bangumi / Steam">
+        <input id="rfLink" placeholder="粘贴作品链接或 TMDB / 优书网书签 JSON">
         <button class="btn" id="rfParse">解析</button>
       </div>
       <div class="results" id="rfResults"></div>
@@ -1800,11 +1914,14 @@ async function pickRefill(i) {
 }
 
 async function doRefillParse() {
-  const url = (el("#rfLink").value || "").trim();
-  if (!url) return toast("请粘贴链接", true);
+  const input = (el("#rfLink").value || "").trim();
+  if (!input) return toast("请粘贴链接", true);
+  if (input.charAt(0) === "{" || input.charAt(0) === "[") {
+    return importJsonInput(input, { refill: true });
+  }
   const btn = el("#rfParse");
   btn.disabled = true; btn.textContent = "解析中…";
-  const r = await api("/api/link", { method: "POST", body: { url, category: S.add.category } });
+  const r = await api("/api/web-import", { method: "POST", body: { input, category: S.add.category } });
   btn.disabled = false; btn.textContent = "解析";
   if (!r.ok || !r.draft) return toast(r.error || "解析失败", true);
   await applyRefill(r.draft);
@@ -1903,12 +2020,8 @@ function openSettings() {
       <div class="tip" id="proxyState">auto = 自动探测本机常见代理端口；当前：${esc(window.__proxy || "未知")}</div>
     </div>
     <div class="form-item" style="margin-bottom:14px">
-      <label>自动备份保留份数</label>
+      <label>写前快照保留份数（每日自动备份固定保留 15 天）</label>
       <input id="setKeep" type="number" min="5" max="200" value="${esc(st.backup_keep || 30)}">
-    </div>
-    <div class="form-item" style="margin-bottom:14px">
-      <label>DeepSeek API Key（预留，暂未启用）</label>
-      <input id="setDeepseek" value="${esc(st.deepseek_key || "")}" placeholder="留空即可，不产生费用">
     </div>
     <div class="section-head" style="margin-top:20px"><h3>导出与恢复</h3><div class="line"></div></div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -1934,7 +2047,9 @@ function openSettings() {
       <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
       <button class="btn btn-danger" id="wipeAll">清空全部数据</button>
     </div>
-    <div class="muted-note" style="margin-top:16px">娱乐档案 v${esc(S.version || "1.2.0")} · 所有数据只存在这台电脑上</div>`;
+    <div class="muted-note" style="margin-top:16px">娱乐档案 ${esc(versionText(S.version))} · 版本号读取自项目根目录的 <b>VERSION</b> 文件</div>
+    ${versionStaleNote()}
+    <div class="muted-note" style="margin-top:6px">所有数据只存在这台电脑上</div>`;
   setModalState("#settingsModal", true);
   applyAppearance(false);
   focusAfterRender("#settingsClose");
@@ -2019,17 +2134,23 @@ async function loadBackups() {
   S.backups = r.backups || [];
   if (!S.backups.length) { box.innerHTML = `<div class="muted-note">还没有自动快照，第一次修改后就会生成。</div>`; return; }
   box.innerHTML = S.backups.map(b => `<div class="backup-row">
+    <span class="b-kind">${esc(b.label || "备份")}</span>
     <span class="b-time">${esc(b.time)}</span>
-    <span>${(b.size / 1024).toFixed(0)} KB</span>
-    <span class="b-size"></span>
-    <button class="btn btn-sm" data-restore="${esc(b.name)}">恢复</button>
+    <span class="b-size">${(b.size / 1024).toFixed(0)} KB</span>
+    <button class="btn btn-sm" data-restore="${esc(b.name)}" data-rkind="${esc(b.kind)}">恢复</button>
   </div>`).join("");
   elAll("[data-restore]", box).forEach(x => x.onclick = async () => {
-    if (!confirm("用这个快照覆盖当前数据？")) return;
-    const r2 = await api("/api/backups/restore", { method: "POST", body: { name: x.dataset.restore } });
-    if (!r2.ok) return toast(r2.error || "恢复失败", true);
-    toast("已恢复到该快照");
-    const b = await api("/api/bootstrap"); S.works = b.works; S.settings = b.settings; renderTabs(); renderWall(); renderStats(); renderStatusChips();
+    x.disabled = true;
+    const ok = await restoreBackup(x.dataset.rkind, x.dataset.restore);
+    x.disabled = false;
+    if (!ok) return;
+    const b = await api("/api/bootstrap");
+    if (b && b.works) {
+      S.works = b.works; S.settings = b.settings || S.settings;
+      S.undoAvailable = Boolean(b.undoAvailable); S.dataState = b.dataState || "normal";
+      updateUndoBtn(); renderTabs(); renderStatusChips(); renderWall(); renderStats();
+    }
+    loadBackups();
   });
 }
 
@@ -2046,6 +2167,7 @@ function bindGlobal() {
   elAll("#timeSelect").forEach(s => s.onchange = (e) => { S.filters.time = e.target.value; renderWall(); });
   el("#addBtn").onclick = openAdd;
   el("#menuBtn").onclick = openSettings;
+  el("#undoBtn").onclick = doUndo;
   el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
   elAll("#groupSeg button").forEach(b => {
@@ -2067,7 +2189,7 @@ function bindGlobal() {
   el("#settingsClose2").onclick = closeSettings;
   el("#settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") closeSettings(); };
   el("#saveSettings").onclick = async () => {
-    const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30, deepseek_key: el("#setDeepseek").value.trim() };
+    const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30 };
     const r = await api("/api/settings", { method: "POST", body });
     if (!r.ok) return toast("保存失败", true);
     S.settings = r.settings; toast("设置已保存"); closeSettings();
@@ -2091,6 +2213,14 @@ function bindGlobal() {
       else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();
       else if (el("#settingsModal").classList.contains("show")) closeSettings();
       else if (S.currentId || S.currentSeriesId) closeDrawer();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+      const tag = (document.activeElement.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement.isContentEditable) return;
+      if (activeOverlayRoot()) return;
+      e.preventDefault();
+      doUndo();
+      return;
     }
     if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault(); el("#searchInput").focus();

@@ -12,10 +12,11 @@ import html as _html
 import io
 import csv
 import json
+import logging
+import logging.handlers
 import mimetypes
 import os
 import re
-import shutil
 import socket
 import struct
 import threading
@@ -30,20 +31,120 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.7.0"
+BASE_DIR = os.path.abspath(os.environ.get("GRDAG_BASE_DIR") or os.path.dirname(os.path.abspath(__file__)))
+VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
+VERSION_UNKNOWN = "未标注"
+_VERSION_CACHE = {"mtime": None, "value": ""}
+
+
+def read_version():
+    """版本号唯一来源：项目根目录的 VERSION 文件。
+
+    只接受「数字.数字」或「数字.数字.数字」的写法（允许前导 v）；文件缺失、读不出、
+    内容不合规都返回空字符串，由调用方决定怎么展示。按 mtime 缓存，文件被覆盖后
+    重新读取，避免每个请求都读盘。
+    """
+    try:
+        stat = os.stat(VERSION_FILE)
+    except OSError:
+        return ""
+    if _VERSION_CACHE["mtime"] == stat.st_mtime_ns:
+        return _VERSION_CACHE["value"]
+    value = ""
+    try:
+        # utf-8-sig 兼容记事本「UTF-8 带 BOM」另存的 VERSION：BOM 会被自动丢掉，
+        # 否则首字符是 \ufeff，正则匹配失败会被误判成「未标注」。
+        with open(VERSION_FILE, "r", encoding="utf-8-sig") as f:
+            raw = f.read().strip()
+        first = raw.splitlines()[0].strip() if raw else ""
+        candidate = re.sub(r"^[vV]\s*", "", first)
+        if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", candidate):
+            value = candidate
+    except Exception:
+        value = ""
+    _VERSION_CACHE.update({"mtime": stat.st_mtime_ns, "value": value})
+    return value
+
+
+# 启动时读一次：界面显示的是「本次运行加载的版本」，而不是磁盘上可能刚被同步覆盖的版本。
+VERSION = read_version() or VERSION_UNKNOWN
+# 写进 HTTP Server 头和 User-Agent 的版本标识只能是 ASCII；VERSION 缺失时用 unversioned。
+VERSION_ASCII = read_version() or "unversioned"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+DAILY_BACKUP_DIR = os.path.join(BACKUP_DIR, "daily")          # 每日自动备份，只保留最近 15 天
+PRE_RESTORE_DIR = os.path.join(BACKUP_DIR, "pre-restore")     # 恢复/撤销前的安全快照，不参与自动清理
+UNDO_USED_DIR = os.path.join(BACKUP_DIR, "undo-used")         # 已被「撤销」消费掉的写前快照
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 SIBLING_BACKUP_DIR = os.path.join(os.path.dirname(BASE_DIR), "娱乐档案_备份")
 LIB_PATH = os.path.join(DATA_DIR, "library.json")
 IMAGE_CACHE_DIR = os.path.join(DATA_DIR, "image_cache")
+LIB_VERSION = 2
+DAILY_KEEP = 15
 PORT = int(os.environ.get("GRDAG_PORT", "8777"))
+
+# ---------------------------------------------------------------- 日志
+LOG = logging.getLogger("grdag")
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)(deepseek[_-]?key|api[_-]?key|token|password|secret)\s*[=:：]\s*[^\s,;]+"), r"\1=***"),
+    (re.compile(r"sk-[A-Za-z0-9_\-]{8,}"), "sk-***"),
+    (re.compile(r"(?i)(authorization\s*[:：]\s*)(\S+)"), r"\1***"),
+)
+
+
+def redact(text):
+    """日志脱敏：密钥、令牌、Authorization 一律不进日志。"""
+    s = str(text if text is not None else "")
+    for pattern, repl in _SECRET_PATTERNS:
+        s = pattern.sub(repl, s)
+    return s
+
+
+def log_event(module, operation, result="ok", detail="", level=logging.INFO, exc=None):
+    """统一日志入口；写日志失败绝不影响业务。"""
+    try:
+        msg = f"{module} | {operation} | {result}"
+        if detail:
+            msg += " | " + redact(detail)
+        LOG.log(level, msg, exc_info=exc)
+    except Exception:
+        pass
+
+
+def setup_logging():
+    """本地滚动日志：logs/app.log，2 MB × 3 份。失败时静默降级，不启动也照常跑。"""
+    try:
+        if LOG.handlers:
+            return
+        os.makedirs(LOG_DIR, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            os.path.join(LOG_DIR, "app.log"), maxBytes=2 * 1024 * 1024,
+            backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOG.addHandler(handler)
+        LOG.setLevel(logging.INFO)
+        LOG.propagate = False
+        logging.raiseExceptions = False
+    except Exception:
+        pass
+
+
+setup_logging()
+
+
+class LibraryCorrupt(Exception):
+    """主档案存在但读不出来/结构不对：拒绝一切写操作，绝不自动覆盖。"""
+
+    def __init__(self, reason, detail=""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-UA_BGM = "GRDAG/1.0 (https://bgm.tv/)"
+UA_BGM = f"GRDAG/{VERSION_ASCII} (https://bgm.tv/)"
 
 CATEGORIES = {
     "anime": {"label": "动漫", "bangumi_type": 2, "sources": ["bangumi", "douban", "anilist"]},
@@ -234,8 +335,27 @@ def new_id(prefix):
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, COVER_DIR, IMAGE_CACHE_DIR, BACKUP_DIR, WEB_DIR):
+    for d in (DATA_DIR, COVER_DIR, IMAGE_CACHE_DIR, BACKUP_DIR, DAILY_BACKUP_DIR,
+              PRE_RESTORE_DIR, UNDO_USED_DIR, WEB_DIR, LOG_DIR):
         os.makedirs(d, exist_ok=True)
+
+
+def atomic_write_bytes(path, data):
+    """临时文件 + fsync + 原子替换：中途断电/异常只会留下 .tmp，绝不会毁掉原文件。"""
+    tmp = f"{path}.tmp-{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        raise
 
 
 def strip_html(s):
@@ -257,53 +377,133 @@ def to_text(v):
     return str(v)
 
 
-def safe_json_load(path, default=None):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
 # ---------------------------------------------------------------- 存储层
 def default_library():
-    return {"version": 2, "works": [], "series": [],
-            "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30, "deepseek_key": ""}}
+    return {"version": LIB_VERSION, "works": [], "series": [],
+            "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30}}
 
 
-def load_library():
-    lib = safe_json_load(LIB_PATH)
-    if not isinstance(lib, dict) or "works" not in lib:
-        lib = default_library()
-        save_library(lib, snapshot=False)
-    lib.setdefault("settings", default_library()["settings"])
+def check_library(lib):
+    """只做结构检查，不改内容。结构不对就抛 ValueError（由调用方决定怎么处理）。"""
+    if not isinstance(lib, dict):
+        raise ValueError("顶层不是 JSON 对象")
+    works = lib.get("works")
+    if not isinstance(works, list):
+        raise ValueError("缺少 works 列表")
+    if not isinstance(lib.get("series", []), list):
+        raise ValueError("series 不是列表")
+    ver = lib.get("version")
+    if isinstance(ver, int) and ver > LIB_VERSION:
+        raise ValueError(f"档案版本 {ver} 比当前程序支持的 {LIB_VERSION} 新")
+    if works:
+        usable = [w for w in works if isinstance(w, dict) and str(w.get("id") or "").strip()]
+        if not usable:
+            raise ValueError("works 里没有任何带 id 的作品")
+
+
+def fill_library_defaults(lib):
+    """补齐前端依赖的字段，只补空的，不覆盖已有内容，也不发起网络请求。"""
+    lib.setdefault("settings", {})
+    for k, v in default_library()["settings"].items():
+        lib["settings"].setdefault(k, v)
     lib.setdefault("series", [])
-    lib["version"] = 2
+    lib["version"] = int(lib.get("version") or LIB_VERSION)
+    for w in lib["works"]:
+        if not isinstance(w, dict):
+            continue
+        w.setdefault("title", "")
+        w.setdefault("tags", [])
+        w.setdefault("aliases", [])
+        w.setdefault("creators", [])
+        w.setdefault("infobox", [])
+        w.setdefault("userFields", [])
+        w.setdefault("seriesLinks", [])
+        w.setdefault("rating", None)
+        w.setdefault("ratingHistory", [])
+        w.setdefault("experiences", [])
+    for s in lib["series"]:
+        if not isinstance(s, dict):
+            continue
+        s.setdefault("rating", None)
+        s.setdefault("ratingHistory", [])
+        s.setdefault("experiences", [])
     return lib
 
 
-def snapshot_library(keep):
+def load_library():
+    """读取主档案。
+
+    - 文件不存在：首次运行，允许创建空档案。
+    - 文件存在但解析失败/结构不对：抛 LibraryCorrupt，原文件一个字节都不动。
+    """
+    if os.path.exists(LIB_PATH):
+        try:
+            with open(LIB_PATH, "r", encoding="utf-8") as f:
+                lib = json.load(f)
+        except Exception as e:
+            log_event("storage", "load", "corrupt", f"{type(e).__name__}: {e}", logging.ERROR)
+            raise LibraryCorrupt("主档案无法解析", f"{type(e).__name__}: {e}")
+        try:
+            check_library(lib)
+        except ValueError as e:
+            log_event("storage", "load", "corrupt", str(e), logging.ERROR)
+            raise LibraryCorrupt("主档案结构异常", str(e))
+        return fill_library_defaults(lib)
+    lib = default_library()
+    write_library(lib)
+    log_event("storage", "create", "ok", "首次运行，已创建空档案")
+    return lib
+
+
+def library_health():
+    """给 /api/bootstrap 用的只读体检结果：normal / corrupt / missing。"""
     if not os.path.exists(LIB_PATH):
-        return
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return {"state": "missing"}
+    try:
+        with open(LIB_PATH, "r", encoding="utf-8") as f:
+            lib = json.load(f)
+        check_library(lib)
+        return {"state": "normal", "works": len(lib.get("works") or []),
+                "series": len(lib.get("series") or [])}
+    except Exception as e:
+        try:
+            size = os.path.getsize(LIB_PATH)
+            mtime = datetime.fromtimestamp(os.path.getmtime(LIB_PATH)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            size, mtime = 0, ""
+        return {"state": "corrupt", "reason": str(e), "size": size, "mtime": mtime,
+                "error_detail": f"{type(e).__name__}: {e}"}
+
+
+def snapshot_library(keep):
+    """写前快照（撤销也依赖它）。文件名带微秒，避免同秒多次写入互相覆盖。"""
+    if not os.path.exists(LIB_PATH):
+        return None
+    ensure_dirs()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     dst = os.path.join(BACKUP_DIR, f"library_{stamp}.json")
     try:
-        shutil.copy2(LIB_PATH, dst)
-    except Exception:
-        return
-    files = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith("library_") and f.endswith(".json"))
+        with open(LIB_PATH, "rb") as f:
+            raw = f.read()
+        atomic_write_bytes(dst, raw)
+    except Exception as e:
+        log_event("backup", "snapshot", "fail", f"{type(e).__name__}: {e}", logging.WARNING)
+        return None
+    files = sorted(f for f in os.listdir(BACKUP_DIR)
+                   if re.fullmatch(r"library_\d{8}_\d{6}(?:_\d{6})?\.json", f))
     while len(files) > max(1, int(keep or 30)):
         try:
             os.remove(os.path.join(BACKUP_DIR, files.pop(0)))
         except Exception:
             break
+    log_event("backup", "snapshot", "ok", os.path.basename(dst))
+    return dst
 
 
 def write_library(lib):
-    tmp = LIB_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(lib, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, LIB_PATH)
+    ensure_dirs()
+    raw = json.dumps(lib, ensure_ascii=False, indent=1).encode("utf-8")
+    atomic_write_bytes(LIB_PATH, raw)
 
 
 def save_library(lib, snapshot=True):
@@ -311,6 +511,145 @@ def save_library(lib, snapshot=True):
     if snapshot:
         snapshot_library(lib.get("settings", {}).get("backup_keep", 30))
     write_library(lib)
+    log_event("storage", "save", "ok", f"works={len(lib.get('works') or [])}")
+    ensure_daily_backup()
+
+
+# ---------------------------------------------------------------- 自动备份（每日 15 天）
+def daily_backup_path(day=None):
+    name = (day or datetime.now().strftime("%Y-%m-%d"))
+    return os.path.join(DAILY_BACKUP_DIR, f"library_{name}.json")
+
+
+def cleanup_daily(keep=DAILY_KEEP):
+    """只清理「每日自动备份」目录，写前快照/恢复前快照/手动导出都不动。"""
+    try:
+        files = sorted(f for f in os.listdir(DAILY_BACKUP_DIR)
+                       if re.fullmatch(r"library_\d{4}-\d{2}-\d{2}\.json", f))
+        while len(files) > max(1, int(keep)):
+            os.remove(os.path.join(DAILY_BACKUP_DIR, files.pop(0)))
+    except Exception as e:
+        log_event("backup", "cleanup", "fail", f"{type(e).__name__}: {e}", logging.WARNING)
+
+
+def ensure_daily_backup(force=False):
+    """今天还没有自动备份就补一份；失败时返回 None，并且不触发任何清理。"""
+    try:
+        if not os.path.exists(LIB_PATH):
+            return None
+        ensure_dirs()
+        dst = daily_backup_path()
+        if os.path.exists(dst) and not force:
+            return dst
+        with open(LIB_PATH, "rb") as f:
+            raw = f.read()
+        json.loads(raw.decode("utf-8"))          # 只备份能解析的内容
+        atomic_write_bytes(dst, raw)
+        log_event("backup", "daily", "ok", os.path.basename(dst))
+        cleanup_daily()
+        return dst
+    except Exception as e:
+        log_event("backup", "daily", "fail", f"{type(e).__name__}: {e}", logging.WARNING)
+        return None
+
+
+def snapshot_before_restore(tag="恢复"):
+    """恢复/撤销前的安全快照，独立目录，不参与自动清理。失败返回 None。"""
+    if not os.path.exists(LIB_PATH):
+        return None
+    try:
+        ensure_dirs()
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        dst = os.path.join(PRE_RESTORE_DIR, f"{tag}前_{stamp}.json")
+        with open(LIB_PATH, "rb") as f:
+            raw = f.read()
+        atomic_write_bytes(dst, raw)
+        log_event("backup", "pre-restore", "ok", os.path.basename(dst))
+        return dst
+    except Exception as e:
+        log_event("backup", "pre-restore", "fail", f"{type(e).__name__}: {e}", logging.ERROR)
+        return None
+
+
+def write_snapshots():
+    """写前快照列表（按时间升序），撤销就是逐步回退它们。"""
+    try:
+        files = [f for f in os.listdir(BACKUP_DIR)
+                 if re.fullmatch(r"library_\d{8}_\d{6}(?:_\d{6})?\.json", f)]
+    except Exception:
+        return []
+    return sorted(files)
+
+
+# ---------------------------------------------------------------- 备份清单 / 校验
+BACKUP_KINDS = {
+    "write": (BACKUP_DIR, "写前快照"),
+    "daily": (DAILY_BACKUP_DIR, "每日自动备份"),
+    "pre-restore": (PRE_RESTORE_DIR, "恢复前安全快照"),
+}
+
+
+def list_backups(limit=60):
+    """三类备份的摘要清单；只读目录，不解析内容，坏了也能列出。"""
+    items = []
+    for kind, (folder, label) in BACKUP_KINDS.items():
+        try:
+            names = os.listdir(folder)
+        except Exception:
+            continue
+        for name in names:
+            if not name.endswith(".json") or not os.path.isfile(os.path.join(folder, name)):
+                continue
+            try:
+                st = os.stat(os.path.join(folder, name))
+            except Exception:
+                continue
+            items.append({
+                "name": name, "kind": kind, "label": label, "size": st.st_size,
+                "time": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+    items.sort(key=lambda x: (x["time"], x["name"]), reverse=True)
+    return items[:limit]
+
+
+def resolve_backup(kind, name):
+    """把 (类型, 文件名) 还原成磁盘路径；只允许三类目录里的 .json，挡住路径穿越。"""
+    folder, _ = BACKUP_KINDS.get(kind or "write", BACKUP_KINDS["write"])
+    base = os.path.basename(str(name or ""))
+    if not base or not base.endswith(".json"):
+        return None
+    path = os.path.join(folder, base)
+    if not os.path.isfile(path):
+        return None
+    return path
+
+
+def load_backup_payload(path):
+    """读取并校验备份文件，返回 (标准化档案, 统计)。不合法抛 ValueError。"""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    try:
+        check_library(data)
+    except ValueError as e:
+        raise ValueError(str(e))
+    lib = fill_library_defaults(data)
+    seen, kept, dup = set(), [], 0
+    for w in lib["works"]:
+        wid = str(w.get("id") or "").strip()
+        if wid in seen:
+            dup += 1
+            continue
+        seen.add(wid)
+        kept.append(w)
+    lib["works"] = kept
+    stats = {
+        "works": len(kept),
+        "series": len(lib.get("series") or []),
+        "rated": sum(1 for w in kept if w.get("rating") is not None),
+        "duplicates": dup,
+        "latest": max((str((w.get("updatedAt") or w.get("createdAt") or "")) for w in kept), default=""),
+    }
+    return lib, stats
 
 
 def extract_library_zip(raw):
@@ -389,8 +728,15 @@ def detect_proxy(preferred_port=""):
 
 
 def resolve_proxy(force=False):
-    lib = load_library()
-    settings = lib.get("settings", {})
+    # 测试环境/离线排查时跳过探测，避免每次 bootstrap 固定等待
+    if os.environ.get("GRDAG_SKIP_PROXY_DETECT"):
+        return _proxy_cache["value"]
+    try:
+        lib = load_library()
+        settings = lib.get("settings", {})
+    except LibraryCorrupt:
+        # 档案损坏时不去探测代理：bootstrap 仍要能打开恢复界面
+        return _proxy_cache["value"]
     cfg = (settings.get("proxy") or "auto").strip()
     if cfg not in ("auto", ""):
         if cfg.lower() in ("direct", "none", "off", "关闭"):
@@ -2894,7 +3240,8 @@ def series_view(s, lib):
 
 # ---------------------------------------------------------------- HTTP 层
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GRDAG/1.0"
+    # HTTP Server 头只能放 ASCII：版本号缺失时用 unversioned，避免中文写进响应头。
+    server_version = "GRDAG/" + VERSION_ASCII
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -2958,35 +3305,57 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 return self.serve_file(cached)
             if p == "/api/bootstrap":
-                lib = load_library()
+                health = library_health()
                 proxy = resolve_proxy()
-                return self.send_json({
+                file_version = read_version() or VERSION_UNKNOWN
+                common = {
+                    # version 是本次运行加载的版本；versionFile 是磁盘上 VERSION 的当前内容。
+                    # 两者不一致说明项目文件已同步但旧进程还在跑，界面会提示重启。
                     "version": VERSION,
-                    "works": [work_view(w) for w in lib["works"]],
-                    "series": [series_view(s, lib) for s in lib["series"]],
+                    "versionFile": file_version,
+                    "versionStale": file_version != VERSION,
                     "seriesKinds": SERIES_KINDS,
                     "seriesRoles": SERIES_ROLES,
-                    "settings": lib["settings"],
                     "proxyActive": proxy,
                     "proxySource": _proxy_cache.get("source"),
                     "categories": [{"key": k, "label": v["label"], "sources": v["sources"],
                                     "statuses": STATUS_LABELS[k]} for k, v in CATEGORIES.items()],
                     "sourceLabels": SOURCE_LABELS,
-                })
+                }
+                if health["state"] == "corrupt":
+                    # 主档案坏了也照常返回 200，让界面能显示恢复入口；但所有写操作会被 409 拒绝。
+                    log_event("storage", "bootstrap", "corrupt", health.get("error_detail", ""), logging.ERROR)
+                    return self.send_json({**common,
+                                           "dataState": "corrupt",
+                                           "dataError": health.get("reason") or "主档案损坏",
+                                           "corruptFile": {"name": os.path.basename(LIB_PATH),
+                                                           "size": health.get("size", 0),
+                                                           "mtime": health.get("mtime", "")},
+                                           "works": [], "series": [],
+                                           "settings": default_library()["settings"],
+                                           "backups": list_backups(),
+                                           "undoAvailable": False})
+                lib = load_library()
+                return self.send_json({**common,
+                                       "dataState": "normal",
+                                       "works": [work_view(w) for w in lib["works"]],
+                                       "series": [series_view(s, lib) for s in lib["series"]],
+                                       "settings": lib["settings"],
+                                       "backups": list_backups(),
+                                       "undoAvailable": bool(write_snapshots())})
             if p == "/api/export":
                 return self.handle_export(bool(qs.get("covers", ["0"])[0] in ("1", "true")))
             if p == "/api/template.csv":
                 return self.handle_template()
             if p == "/api/backups":
-                files = []
-                for f in sorted(os.listdir(BACKUP_DIR), reverse=True):
-                    if f.startswith("library_") and f.endswith(".json"):
-                        fp = os.path.join(BACKUP_DIR, f)
-                        files.append({"name": f, "size": os.path.getsize(fp),
-                                      "time": datetime.fromtimestamp(os.path.getmtime(fp)).strftime("%Y-%m-%d %H:%M:%S")})
-                return self.send_json({"ok": True, "backups": files[:40]})
+                return self.send_json({"ok": True, "backups": list_backups()})
             self._send(404, json.dumps({"ok": False, "error": "not found"}), "application/json")
+        except LibraryCorrupt as e:
+            log_event("http", "GET " + p, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
+            self.send_json({"ok": False, "dataState": "corrupt",
+                            "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
         except Exception as e:
+            log_event("http", "GET " + p, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_POST(self):
@@ -3009,6 +3378,8 @@ class Handler(BaseHTTPRequestHandler):
                 draft = parse_link(body.get("url") or "", cat)
                 draft["_ready"] = True
                 return self.send_json({"ok": True, "draft": draft})
+            if p == "/api/web-import":
+                return self.handle_web_import(body)
             if p == "/api/works":
                 return self.handle_create(body)
             if p == "/api/import-records":
@@ -3021,6 +3392,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_settings(body)
             if p == "/api/backups/restore":
                 return self.handle_restore(body)
+            if p == "/api/backups/preview":
+                return self.handle_backup_preview(body)
+            if p == "/api/recover/new-start":
+                return self.handle_recover_new_start(body)
+            if p == "/api/undo":
+                return self.handle_undo(body)
             if p == "/api/proxy/check":
                 val = resolve_proxy(force=True)
                 return self.send_json({"ok": True, "proxy": val, "state": "连通" if val else "未探测到可用代理"})
@@ -3042,12 +3419,28 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 return self.handle_series_members(m.group(1), body)
             self._send(404, json.dumps({"ok": False, "error": "not found"}), "application/json")
+        except LibraryCorrupt as e:
+            log_event("http", "POST " + p, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
+            self.send_json({"ok": False, "dataState": "corrupt",
+                            "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
         except Exception as e:
+            log_event("http", "POST " + p, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_PATCH(self):
         u = urlparse(self.path)
         body = self.read_body()
+        try:
+            return self._patch(u, body)
+        except LibraryCorrupt as e:
+            log_event("http", "PATCH " + u.path, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
+            self.send_json({"ok": False, "dataState": "corrupt",
+                            "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
+        except Exception as e:
+            log_event("http", "PATCH " + u.path, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
+            self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def _patch(self, u, body):
         m = re.match(r"^/api/series/([^/]+)$", u.path)
         if m:
             return self.handle_series_update(m.group(1), body)
@@ -3081,6 +3474,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         u = urlparse(self.path)
+        try:
+            return self._delete(u)
+        except LibraryCorrupt as e:
+            log_event("http", "DELETE " + u.path, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
+            self.send_json({"ok": False, "dataState": "corrupt",
+                            "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
+        except Exception as e:
+            log_event("http", "DELETE " + u.path, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
+            self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def _delete(self, u):
         m = re.match(r"^/api/works/([^/]+)$", u.path)
         m2 = re.match(r"^/api/works/([^/]+)/experience/([^/]+)$", u.path)
         ms = re.match(r"^/api/series/([^/]+)$", u.path)
@@ -3224,6 +3628,63 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": False, "error": str(e)}, 400)
         except Exception as e:
             return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+    def handle_web_import(self, body):
+        """统一网页导入入口：一个输入框同时接受作品链接和书签提取的 JSON。
+
+        两种方式最终都收敛成同一个 draft，前端只用一套「预览 → 填入表单」流程。
+        """
+        raw = str(body.get("input") or body.get("url") or "").strip()
+        if not raw:
+            return self.send_json({"ok": False, "error": "请粘贴作品链接或书签 JSON"}, 400)
+        category = body.get("category")
+        first = raw[:1]
+        if first in ("{", "["):
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return self.send_json({"ok": False, "error": "粘贴的内容不是有效的 JSON"}, 400)
+            if not isinstance(data, dict):
+                return self.send_json({"ok": False, "error": "书签 JSON 应该是一个对象"}, 400)
+            src = str((data.get("source") or {}).get("name") if isinstance(data.get("source"), dict)
+                      else data.get("source") or "").lower()
+            warnings = []
+            try:
+                if src == "tmdb" or data.get("tmdbId") or data.get("mediaType"):
+                    draft = validate_tmdb_payload(raw)
+                    source_label = "TMDB"
+                elif src == "youshu" or data.get("youshuId"):
+                    draft, warnings = validate_youshu_payload(raw)
+                    source_label = "优书网"
+                else:
+                    if not str(data.get("title") or "").strip():
+                        return self.send_json({"ok": False, "error": "JSON 里没有 title，无法识别"}, 400)
+                    draft = {k: v for k, v in data.items() if not str(k).startswith("_")}
+                    source_label = str((data.get("source") or {}).get("label") if isinstance(data.get("source"), dict) else "") or "通用草稿"
+                    warnings = ["未识别的来源，按通用草稿填入，请核对标题和封面"]
+            except ValueError as e:
+                return self.send_json({"ok": False, "error": str(e)}, 400)
+            if not str(draft.get("title") or "").strip():
+                return self.send_json({"ok": False, "error": "书签内容缺少标题"}, 400)
+            draft["_ready"] = True
+            return self.send_json({"ok": True, "kind": "json", "sourceLabel": source_label,
+                                   "draft": draft, "warnings": warnings})
+        if not re.match(r"^https?://", raw, re.I):
+            return self.send_json({"ok": False,
+                                   "error": "请粘贴以 http 开头的作品链接，或书签复制的 JSON"}, 400)
+        host = (urlparse(raw).hostname or "").lower()
+        if host.endswith("themoviedb.org") or host.endswith("youshu.me"):
+            return self.send_json({"ok": False,
+                                   "error": "这个站点请在其详情页点击书签提取 JSON，再粘贴到这里（不做整页抓取）"}, 400)
+        try:
+            draft = parse_link(raw, category)
+        except RuntimeError as e:
+            return self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+        draft["_ready"] = True
+        return self.send_json({"ok": True, "kind": "url", "sourceLabel": "链接解析",
+                               "draft": draft, "warnings": []})
 
     def handle_create(self, body):
         draft = body.get("draft") or body
@@ -3639,7 +4100,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_settings(self, body):
         with _lock:
             lib = load_library()
-            for k in ("proxy", "proxy_port", "backup_keep", "deepseek_key"):
+            for k in ("proxy", "proxy_port", "backup_keep"):
                 if k in body:
                     lib["settings"][k] = body[k]
             save_library(lib, snapshot=False)
@@ -3647,16 +4108,131 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": True, "settings": lib["settings"]})
 
     def handle_restore(self, body):
-        name = os.path.basename(body.get("name") or "")
-        fp = os.path.join(BACKUP_DIR, name)
-        if not os.path.exists(fp):
-            return self.send_json({"ok": False, "error": "快照不存在"}, 404)
-        data = safe_json_load(fp)
-        if not data:
-            return self.send_json({"ok": False, "error": "快照损坏"}, 400)
-        with _lock:
-            save_library(data)
-        return self.send_json({"ok": True, "count": len(data.get("works", []))})
+        """恢复备份：先校验，再确认，再安全快照，最后原子替换 + 回读校验，失败自动回滚。"""
+        kind = body.get("kind") or "write"
+        name = os.path.basename(str(body.get("name") or ""))
+        if (body.get("confirm") or "") != "恢复":
+            return self.send_json({"ok": False, "error": "恢复需要明确确认"}, 400)
+        fp = resolve_backup(kind, name)
+        if not fp:
+            return self.send_json({"ok": False, "error": "备份不存在"}, 404)
+        try:
+            lib, stats = load_backup_payload(fp)
+        except Exception as e:
+            log_event("backup", "restore", "invalid", f"{name}: {e}", logging.WARNING)
+            return self.send_json({"ok": False, "error": f"备份不可用，未执行恢复：{e}"}, 400)
+        safety = snapshot_before_restore("恢复")
+        if not safety:
+            return self.send_json({"ok": False,
+                                   "error": "未能创建恢复前安全快照，已取消恢复（当前档案未改动）"}, 500)
+        try:
+            write_library(lib)
+        except Exception as e:
+            log_event("backup", "restore", "write-fail", f"{type(e).__name__}: {e}", logging.ERROR)
+            return self.send_json({"ok": False, "error": f"写入失败，当前档案未改动：{e}"}, 500)
+        # 回读校验：恢复后档案必须能正常解析，否则回滚
+        try:
+            with open(LIB_PATH, "r", encoding="utf-8") as f:
+                reloaded = json.load(f)
+            check_library(reloaded)
+        except Exception as e:
+            try:
+                with open(safety, "rb") as f:
+                    atomic_write_bytes(LIB_PATH, f.read())
+                log_event("backup", "restore", "rolled-back", f"{name}: {e}", logging.ERROR)
+                tail = "，已回滚到恢复前状态"
+            except Exception as e2:
+                log_event("backup", "restore", "rollback-fail",
+                          f"{e2}", logging.CRITICAL)
+                tail = f"，回滚也失败，请手动使用 {os.path.basename(safety)}"
+            return self.send_json({"ok": False, "error": f"恢复后校验失败{tail}"}, 500)
+        log_event("backup", "restore", "ok", f"{name} works={stats['works']}")
+        return self.send_json({"ok": True, "count": stats["works"], "series": stats["series"],
+                               "safety": os.path.basename(safety)})
+
+    def handle_backup_preview(self, body):
+        """恢复前预览：校验备份、给出当前档案与备份的数量差异和风险提示。"""
+        kind = body.get("kind") or "write"
+        name = os.path.basename(str(body.get("name") or ""))
+        fp = resolve_backup(kind, name)
+        if not fp:
+            return self.send_json({"ok": False, "error": "备份不存在"}, 404)
+        try:
+            lib, stats = load_backup_payload(fp)
+        except Exception as e:
+            return self.send_json({"ok": False, "valid": False,
+                                   "error": f"这个备份不可用：{e}"}, 400)
+        health = library_health()
+        current = {"works": health.get("works", 0), "series": health.get("series", 0),
+                   "state": health.get("state")}
+        warnings = []
+        if health.get("state") == "normal" and stats["works"] < current["works"]:
+            warnings.append(f"这个备份比当前档案少 {current['works'] - stats['works']} 部作品，恢复会丢掉这些作品")
+        if health.get("state") == "normal" and stats["series"] < current["series"]:
+            warnings.append(f"系列会从 {current['series']} 个变成 {stats['series']} 个")
+        if stats.get("duplicates"):
+            warnings.append(f"备份里有 {stats['duplicates']} 条重复 ID，会保留第一条")
+        return self.send_json({"ok": True, "valid": True, "name": name, "kind": kind,
+                               "stats": stats, "current": current, "warnings": warnings})
+
+    def handle_recover_new_start(self, body):
+        """主档案损坏且没有可用备份时，经用户明确确认后另存损坏文件并新建空档案。"""
+        if (body.get("confirm") or "") != "新建空档案":
+            return self.send_json({"ok": False, "error": "需要明确确认"}, 400)
+        health = library_health()
+        if health.get("state") != "corrupt":
+            return self.send_json({"ok": False, "error": "当前主档案可以正常读取，不需要新建"}, 400)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        corrupt_copy = os.path.join(DATA_DIR, f"library.corrupt-{stamp}.json")
+        try:
+            os.replace(LIB_PATH, corrupt_copy)
+        except Exception as e:
+            log_event("storage", "recover", "fail", f"{type(e).__name__}: {e}", logging.ERROR)
+            return self.send_json({"ok": False, "error": f"无法移动损坏文件，操作已取消：{e}"}, 500)
+        try:
+            write_library(default_library())
+        except Exception as e:
+            try:
+                os.replace(corrupt_copy, LIB_PATH)
+            except Exception:
+                pass
+            return self.send_json({"ok": False, "error": f"新建空档案失败，已还原：{e}"}, 500)
+        log_event("storage", "recover", "ok", f"损坏文件已保留为 {os.path.basename(corrupt_copy)}")
+        return self.send_json({"ok": True, "corruptCopy": os.path.basename(corrupt_copy)})
+
+    def handle_undo(self, body):
+        """撤销最近一次写操作：回退到最近一份写前快照；快照会被移入 undo-used，连续撤销可继续往前退。"""
+        snaps = write_snapshots()
+        if not snaps:
+            return self.send_json({"ok": False, "error": "没有可撤销的操作"}, 400)
+        newest = os.path.join(BACKUP_DIR, snaps[-1])
+        try:
+            lib, stats = load_backup_payload(newest)
+        except Exception as e:
+            log_event("undo", "load", "invalid", f"{snaps[-1]}: {e}", logging.WARNING)
+            return self.send_json({"ok": False, "error": f"上一份快照不可用：{e}"}, 400)
+        safety = snapshot_before_restore("撤销")
+        if not safety:
+            return self.send_json({"ok": False, "error": "未能创建撤销前安全快照，已取消"}, 500)
+        try:
+            write_library(lib)
+            with open(LIB_PATH, "r", encoding="utf-8") as f:
+                check_library(json.load(f))
+        except Exception as e:
+            try:
+                with open(safety, "rb") as f:
+                    atomic_write_bytes(LIB_PATH, f.read())
+            except Exception:
+                pass
+            return self.send_json({"ok": False, "error": f"撤销失败，已尽量还原：{e}"}, 500)
+        try:
+            os.makedirs(UNDO_USED_DIR, exist_ok=True)
+            os.replace(newest, os.path.join(UNDO_USED_DIR, os.path.basename(newest)))
+        except Exception:
+            pass
+        log_event("undo", "apply", "ok", f"{snaps[-1]} works={stats['works']}")
+        return self.send_json({"ok": True, "works": stats["works"],
+                               "remaining": len(write_snapshots())})
 
 
 def _port_alive(port):
@@ -3676,12 +4252,21 @@ def _port_alive(port):
 
 def main():
     ensure_dirs()
-    lib = load_library()
+    corrupt_error = ""
+    try:
+        lib = load_library()
+        ensure_daily_backup()
+    except LibraryCorrupt as e:
+        # 损坏时不写盘、不退出：起服务让界面显示恢复入口，所有写操作都会被拒绝。
+        lib = None
+        corrupt_error = f"{e.reason}：{e.detail}" if e.detail else e.reason
+        log_event("startup", "load", "corrupt", corrupt_error, logging.ERROR)
     if _port_alive(PORT):
         print("=" * 52)
         print(f"  {PORT} 端口上已经有一个实例在跑，这次不再重复启动。")
         print(f"  已为你打开：http://127.0.0.1:{PORT}")
         print("  （Windows 允许多个进程绑同一端口，所以之前会出现两个实例。）")
+        print("  如果刚同步过项目文件，请先关掉旧窗口再启动，否则页面显示的仍是旧版本。")
         print("=" * 52)
         try:
             webbrowser.open(f"http://127.0.0.1:{PORT}")
@@ -3698,14 +4283,25 @@ def main():
         return
     print("=" * 52)
     print("  娱乐档案 · 本地服务")
+    print(f"  当前版本：{VERSION}（读取自 VERSION 文件）")
+    if VERSION == VERSION_UNKNOWN:
+        print("  ｜ 注意：没读到有效的版本号，界面会显示「版本未标注」")
+        print("  ｜ 请检查根目录 VERSION：应为一行 1.2.3 这样的内容（允许前导 v）")
     print(f"  数据文件：{LIB_PATH}")
     print(f"  封面目录：{COVER_DIR}")
     print(f"  备份目录：{BACKUP_DIR}")
     print(f"  访问地址：http://127.0.0.1:{PORT}")
-    print(f"  作品数量：{len(lib['works'])}")
+    if lib is None:
+        print("  ｜ 主档案损坏，已停止写入保护原文件")
+        print(f"  ｜ 原因：{corrupt_error}")
+        print("  ｜ 请在网页里选择「从备份恢复」或确认后「新建空档案」")
+    else:
+        print(f"  作品数量：{len(lib['works'])}")
     print("  关闭这个窗口 = 停止服务，数据已写盘")
+    log_event("startup", "serve", "ok", f"version={VERSION} port={PORT}")
     print("=" * 52)
-    threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+    if not os.environ.get("GRDAG_NO_BROWSER"):
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

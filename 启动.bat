@@ -1,6 +1,10 @@
 @echo off
-title Archive Server
 cd /d "%~dp0"
+rem 版本号唯一来源：根目录 VERSION 文件；读不到就只显示 Archive Server
+set "VER="
+if exist "%~dp0VERSION" for /f "usebackq delims=" %%v in ("%~dp0VERSION") do if not defined VER set "VER=%%v"
+if defined VER if /i "%VER:~0,1%"=="v" set "VER=%VER:~1%"
+if defined VER (title Archive Server v%VER%) else (title Archive Server)
 set "PYEXE="
 if exist "%~dp0runtime\python\python.exe" set "PYEXE=%~dp0runtime\python\python.exe"
 if defined PYEXE goto run
