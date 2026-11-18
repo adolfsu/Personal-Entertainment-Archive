@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.6.4"
+VERSION = "1.7.0"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
@@ -67,7 +67,8 @@ STATUS_LABELS = {
 }
 SOURCE_LABELS = {"bangumi": "Bangumi", "douban": "豆瓣", "weread": "微信读书", "steam": "Steam",
                  "bilibili": "B站", "cinemeta": "Cinemeta", "web": "搜索引擎", "anilist": "AniList",
-                 "manual": "手动", "link": "链接解析", "hongguo": "红果", "tmdb": "TMDB"}
+                 "manual": "手动", "link": "链接解析", "hongguo": "红果", "tmdb": "TMDB",
+                 "youshu": "优书网"}
 SERIES_KINDS = {"mixed": "跨媒介系列", "single": "单一媒介系列", "bookset": "丛书"}
 SERIES_ROLES = {"main": "正传", "sequel": "续作", "side": "外传", "adaptation": "改编",
                 "remake": "重制", "port": "移植", "collection": "合集", "dlc": "DLC", "crossover": "联动"}
@@ -357,7 +358,7 @@ IMAGE_HOST_SUFFIXES = (
     "bgm.tv", "doubanio.com", "douban.com", "steamstatic.com",
     "steamcdn-a.akamaihd.net", "hdslb.com", "biliimg.com", "qq.com",
     "hongguoduanju.com", "douyinpic.com", "byteimg.com", "metahub.space",
-    "tmdb.org", "themoviedb.org",
+    "tmdb.org", "themoviedb.org", "kuangxiangit.com", "ciweimao.com",
 )
 
 
@@ -459,6 +460,8 @@ def _image_ext(body, url):
         return ".webp"
     if body[:2] == b"\xff\xd8":
         return ".jpg"
+    if body[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
     ext = os.path.splitext(urlparse(url).path)[1].lower()
     return ext if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
 
@@ -2429,6 +2432,331 @@ def import_tmdb_work(raw, target_id=None, overrides=None, rating=None, first_exp
         return "created", work
 
 
+# ---------------------------------------------------------------- 优书网剪贴板导入
+YOUSHU_JSON_LIMIT = 120000
+YOUSHU_DETAIL_HOSTS = ("youshu.me", "www.youshu.me")
+YOUSHU_COVER_SUFFIXES = ("qq.com", "byteimg.com", "yuewen.com", "qpic.cn", "kuangxiangit.com", "ciweimao.com")
+YOUSHU_INFOBOX_KEYS = {
+    "优书 ID", "阅读平台", "分类", "状态", "字数",
+    "优书评分", "评分人数", "原书链接",
+}
+
+
+def _youshu_text(value, limit, label, required=False):
+    if value is None:
+        s = ""
+    elif isinstance(value, str):
+        s = value
+    else:
+        raise ValueError("%s格式不正确" % label)
+    s = strip_html(_html.unescape(s)).strip()
+    if len(s) > limit:
+        s = s[:limit]
+    if required and not s:
+        raise ValueError("%s不能为空" % label)
+    return s
+
+
+def _youshu_string_list(value, limit, item_limit, label):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("%s格式不正确" % label)
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("%s格式不正确" % label)
+        s = _youshu_text(item, item_limit, label)
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _youshu_creators(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("演职人员格式不正确")
+    out = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("演职人员格式不正确")
+        role = _youshu_text(item.get("role"), 30, "演职人员角色")
+        name = _youshu_text(item.get("name"), 100, "演职人员姓名")
+        if not role or not name:
+            continue
+        key = (role, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"role": role, "name": name})
+        if len(out) >= 30:
+            break
+    return out
+
+
+def _youshu_infobox(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("资料表格式不正确")
+    out = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("资料表格式不正确")
+        key = _youshu_text(item.get("key"), 30, "资料表字段名")
+        if key not in YOUSHU_INFOBOX_KEYS:
+            continue
+        raw = item.get("value")
+        if raw is None:
+            continue
+        if not isinstance(raw, (str, int, float)):
+            raise ValueError("资料表字段值格式不正确")
+        val = _youshu_text(str(raw), 1200, "资料表字段值")
+        if not val:
+            continue
+        out.append({"key": key, "value": val})
+        if len(out) >= 20:
+            break
+    return out
+
+
+def _youshu_detail_info(raw):
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("source.url 不能为空")
+    raw = raw.strip()
+    u = urlparse(raw)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("source.url 不是合法的网址")
+    if (u.hostname or "").lower() not in YOUSHU_DETAIL_HOSTS:
+        raise ValueError("source.url 必须是优书网详情页")
+    path = (u.path or "").rstrip("/")
+    sid = ""
+    if path == "/modules/article/articleinfo.php":
+        ids = parse_qs(u.query).get("id") or []
+        if len(ids) != 1:
+            raise ValueError("优书网详情页 ID 不合法")
+        sid = ids[0]
+    else:
+        m = re.fullmatch(r"/book/(\d+)", path)
+        if m:
+            sid = m.group(1)
+    if not sid or not re.fullmatch(r"\d+", sid):
+        raise ValueError("source.url 必须是 /book/{id} 详情页")
+    return sid, "https://www.youshu.me/book/" + sid
+
+
+def _youshu_cover_info(value):
+    if value is None:
+        return "", ""
+    if not isinstance(value, str):
+        raise ValueError("封面地址必须是文本")
+    raw = value.strip()
+    if not raw:
+        return "", ""
+    if len(raw) > 1600:
+        return "", "封面地址过长，已忽略"
+    u = urlparse(raw)
+    if u.scheme != "https" or not u.hostname:
+        return "", "封面地址不是 https 图片，已忽略"
+    host = (u.hostname or "").lower()
+    if host in YOUSHU_DETAIL_HOSTS:
+        return "", "优书网占位图或详情页地址不作为封面"
+    if not any(host == s or host.endswith("." + s) for s in YOUSHU_COVER_SUFFIXES):
+        return "", "封面域名不在优书网支持范围，已忽略"
+    if "nocover" in (u.path or "").lower():
+        return "", "已识别占位图 nocover.jpg，未作为封面"
+    return raw, ""
+
+
+def _youshu_rating(value):
+    if value in (None, ""):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score < 0 or score > 10:
+        return None
+    return round(score, 1)
+
+
+def validate_youshu_payload(raw):
+    """校验 Bookmarklet 生成的优书网 JSON；返回 (draft, warnings)。"""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("请先粘贴优书网书签生成的 JSON")
+    if len(raw) > YOUSHU_JSON_LIMIT:
+        raise ValueError("粘贴内容过长，无法导入")
+    try:
+        obj = json.loads(raw)
+    except Exception as e:
+        raise ValueError("JSON 格式不正确：%s" % e)
+    if not isinstance(obj, dict):
+        raise ValueError("JSON 顶层必须是对象")
+    source = obj.get("source")
+    if not isinstance(source, dict):
+        raise ValueError("缺少 source，无法识别来源")
+    if _youshu_text(source.get("name"), 30, "来源名称").lower() != "youshu":
+        raise ValueError("来源不是优书网（source.name 必须为 youshu）")
+
+    sid, canonical = _youshu_detail_info(source.get("url"))
+    raw_sid = source.get("id")
+    if isinstance(raw_sid, (int, float)) and not isinstance(raw_sid, bool):
+        if int(raw_sid) != raw_sid:
+            raise ValueError("优书网作品 ID 不合法")
+        source_id = str(int(raw_sid))
+    else:
+        source_id = _youshu_text(raw_sid, 30, "作品 ID")
+    if not source_id:
+        source_id = sid
+    if not re.fullmatch(r"\d+", source_id):
+        raise ValueError("优书网作品 ID 不合法")
+    if source_id != sid:
+        raise ValueError("source.id 与详情页 URL 不一致")
+
+    category = _youshu_text(obj.get("category"), 20, "分类")
+    if category and category != "novel":
+        raise ValueError("优书网资料只能导入到网文分类")
+    source_type = _youshu_text(source.get("type"), 20, "来源类型")
+    if source_type and source_type != "novel":
+        raise ValueError("来源类型不是网文")
+
+    title = _youshu_text(obj.get("title"), 200, "标题", required=True)
+    summary = _youshu_text(obj.get("summary"), 20000, "简介")
+    tags = _youshu_string_list(obj.get("tags"), 40, 40, "标签")
+    creators = _youshu_creators(obj.get("creators"))
+    infobox = _youshu_infobox(obj.get("infobox"))
+    cover_url, cover_warning = _youshu_cover_info(obj.get("coverUrl"))
+    score = _youshu_rating(obj.get("ratingRef"))
+    votes = None
+    for item in infobox:
+        if item.get("key") == "评分人数":
+            try:
+                votes = int(float(item.get("value")) + 0.5)
+            except (TypeError, ValueError):
+                votes = None
+    warnings = []
+    if cover_warning:
+        warnings.append(cover_warning)
+
+    draft = {
+        "category": "novel",
+        "title": title,
+        "originalTitle": "",
+        "aliases": [],
+        "year": "",
+        "summary": summary,
+        "tags": tags,
+        "creators": creators,
+        "infobox": infobox,
+        "coverUrl": cover_url,
+        "previewUrl": cover_url,
+        "coverProxy": False,
+        "coverReferer": canonical,
+        "ratingRef": score,
+        "source": {
+            "name": "youshu",
+            "label": "优书网",
+            "type": "novel",
+            "id": source_id,
+            "url": canonical,
+        },
+    }
+    if score is not None:
+        meta = {"source": "优书网"}
+        if votes is not None:
+            meta["total"] = votes
+        draft["ratingMeta"] = meta
+    return draft, warnings
+
+
+def _youshu_work_identity(work):
+    src = work.get("source") if isinstance(work.get("source"), dict) else {}
+    if (src.get("name") or "").strip().lower() != "youshu":
+        return ""
+    sid = str(src.get("id") or "").strip()
+    if re.fullmatch(r"\d+", sid):
+        return sid
+    try:
+        sid2, _ = _youshu_detail_info(src.get("url"))
+        return sid2
+    except Exception:
+        return ""
+
+
+def _youshu_work_brief(work):
+    src = work.get("source") if isinstance(work.get("source"), dict) else {}
+    return {
+        "id": work.get("id") or "",
+        "title": work.get("title") or "",
+        "category": work.get("category") or "",
+        "year": work.get("year") or "",
+        "coverUrl": ("/" + work["cover"]).replace("//", "/") if work.get("cover") else "",
+        "source": {
+            "name": src.get("name") or "",
+            "label": src.get("label") or SOURCE_LABELS.get(src.get("name") or "", ""),
+            "id": src.get("id") or "",
+            "url": src.get("url") or "",
+        },
+    }
+
+
+def _youshu_find_targets(lib, draft, target_id):
+    works = lib.get("works") or []
+    target = None
+    if target_id:
+        target = next((w for w in works if str(w.get("id")) == str(target_id)), None)
+        if target is None:
+            raise ValueError("目标作品不存在")
+        if target.get("category") != "novel":
+            raise ValueError("目标作品不是网文")
+    sid = str(draft["source"]["id"])
+    match = next((w for w in works
+                  if _youshu_work_identity(w) == sid and
+                  (not target or str(w.get("id")) != str(target.get("id")))), None)
+    nt = _norm_title(draft.get("title") or "")
+    title_matches = []
+    for w in works:
+        if nt and _norm_title(w.get("title") or "") == nt:
+            if target and str(w.get("id")) == str(target.get("id")):
+                continue
+            if _youshu_work_identity(w) == sid:
+                continue
+            title_matches.append(_youshu_work_brief(w))
+            if len(title_matches) >= 5:
+                break
+    return target, match, title_matches
+
+
+def _youshu_preview_response(lib, draft, target_id, warnings=None):
+    target, match, title_matches = _youshu_find_targets(lib, draft, target_id)
+    warnings = list(warnings or [])
+    sid = str(draft["source"]["id"])
+    if target:
+        current = _youshu_work_identity(target)
+        if not current:
+            warnings.append("当前作品还没有优书网来源；本次只补充资料字段，不改动个人记录。")
+        elif current != sid:
+            warnings.append("当前作品已有其他优书网 ID（%s），请确认是否要导入这份资料。" % current)
+    if match:
+        warnings.append("库中已有同一优书网 ID 的作品「%s」，继续新建可能产生重复记录。"
+                        % (match.get("title") or match.get("id")))
+    if title_matches:
+        warnings.append("库中有同名但优书 ID 不同的作品，注意避免误合并。")
+    return {
+        "draft": draft,
+        "identity": {"source": "youshu", "id": sid, "url": draft["source"]["url"]},
+        "target": _youshu_work_brief(target) if target else None,
+        "match": _youshu_work_brief(match) if match else None,
+        "titleMatches": title_matches,
+        "action": "update" if target else ("update" if match else "create"),
+        "warnings": warnings,
+    }
+
+
 def effective_experience(work):
     """当前状态由『经历日期』最新的一条决定，而不是最后添加的那条。
     同一天有多条时，按添加先后，后加的算更新。"""
@@ -2674,6 +3002,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_tmdb_preview(body)
             if p == "/api/tmdb/import":
                 return self.handle_tmdb_import(body)
+            if p == "/api/youshu/preview":
+                return self.handle_youshu_preview(body)
             if p == "/api/link":
                 cat = body.get("category")
                 draft = parse_link(body.get("url") or "", cat)
@@ -2873,6 +3203,27 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
         return self.send_json({"ok": True, "action": action, "work": work_view(work)})
+
+    def handle_youshu_preview(self, body):
+        """只校验优书网剪贴板 JSON 并返回预览，不写作品库。"""
+        target_id = body.get("targetId")
+        if target_id is not None and not isinstance(target_id, (str, int)):
+            return self.send_json({"ok": False, "error": "targetId 不合法"}, 400)
+        try:
+            draft, warnings = validate_youshu_payload(body.get("json"))
+            with _lock:
+                lib = load_library()
+                preview = _youshu_preview_response(
+                    lib, draft, str(target_id) if target_id else None, warnings)
+                if not target_id and preview.get("match"):
+                    title = (preview["match"].get("title") or preview["match"].get("id") or "")
+                    raise ValueError("作品库中已有同一优书网 ID 的作品「%s」，请打开已有作品编辑后再导入" % title)
+            preview["ok"] = True
+            return self.send_json(preview)
+        except ValueError as e:
+            return self.send_json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            return self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
     def handle_create(self, body):
         draft = body.get("draft") or body
@@ -3363,3 +3714,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

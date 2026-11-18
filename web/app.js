@@ -40,7 +40,7 @@ const S = {
   filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
   currentId: null, currentSeriesId: null,
   drawerRating: 8, seriesRating: 8,
-  add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null },
+  add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, youshuRaw: "", youshuPreview: null, youshuApplied: null },
   seriesDraft: { mode: "create", attachTo: null },
   backups: [],
 };
@@ -945,28 +945,41 @@ function tmdbCreatorNames(draft, roles) {
   return list.filter(c => roles.some(r => String(c.role || "").includes(r)))
     .map(c => c.name).filter(Boolean).join("、");
 }
+function supportsUnifiedBookmarklet(category) {
+  return category === "movie" || category === "novel";
+}
+
 function tmdbImportHTML(a) {
-  if (a.category !== "movie") return "";
+  if (!a || !supportsUnifiedBookmarklet(a.category)) return "";
+  const isMovie = a.category === "movie";
+  const previewLabel = isMovie ? "预览资料" : "识别资料";
+  const placeholder = isMovie
+    ? "在这里粘贴 TMDB 或优书网书签生成的 JSON"
+    : "在这里粘贴优书网书签生成的 JSON";
+  const importNote = isMovie
+    ? "TMDB 会进入现有预览流程；优书网资料请到网文编辑页导入"
+    : "优书网资料会先预览，确认后填入表单；保存仍需手动点击";
   return `
     <div class="tmdb-import" id="tmdbImportBox">
       <div class="refill-head">
-        <h4>从 TMDB 粘贴资料</h4>
-        <span class="hint">在 TMDB 详情页点击书签复制 JSON，粘贴到这里先预览；确认后才保存，不覆盖已有非空资料。</span>
+        <h4>统一资料书签</h4>
+        <span class="hint">${isMovie ? "在 TMDB 详情页点击书签复制 JSON，粘贴到这里预览并导入。" : "在优书网详情页点击书签复制 JSON，粘贴到这里识别、预览，确认后填入下方表单。"}</span>
       </div>
       <div class="tmdb-bookmark-note">
-        <div class="tmdb-bookmark-title"><b>书签：TMDB→项目</b><span>只需安装一次，之后在任意 TMDB 详情页点击即可复制资料。</span></div>
+        <div class="tmdb-bookmark-title"><b>书签：导入个人娱乐档案</b><span>一个书签同时支持 TMDB 与优书网详情页。</span></div>
         <div class="tmdb-bookmark-actions">
-          <button class="btn btn-sm" id="tmdbCopyBookmarklet">复制书签脚本</button>
-          <a class="btn btn-ghost btn-sm tmdb-search-link is-disabled" id="tmdbSearchLink" target="_blank" rel="noopener noreferrer" aria-disabled="true">前往 TMDB 搜索</a>
-          <span class="tmdb-search-hint" id="tmdbSearchHint">当前没有标题，请先在搜索框输入作品标题</span>
+          <button class="btn btn-sm" id="tmdbCopyBookmarklet">复制统一书签</button>
+          ${isMovie ? `<a class="btn btn-ghost btn-sm tmdb-search-link is-disabled" id="tmdbSearchLink" target="_blank" rel="noopener noreferrer" aria-disabled="true">前往 TMDB 搜索</a>
+          <span class="tmdb-search-hint" id="tmdbSearchHint">当前没有标题，请先在搜索框输入作品标题</span>` : `<a class="btn btn-ghost btn-sm tmdb-search-link is-disabled" id="youshuSearchLink" target="_blank" rel="noopener noreferrer" aria-disabled="true">前往优书网搜索</a>
+          <span class="tmdb-search-hint" id="youshuSearchHint">当前没有标题，请先在搜索框输入作品标题</span>`}
         </div>
-        <div class="tmdb-bookmark-help">Chrome / Edge：右键书签栏 → 添加网页；名称填「TMDB→项目」，网址粘贴刚复制的脚本。之后在 TMDB 详情页点击该书签即可。</div>
+        <div class="tmdb-bookmark-help">Chrome / Edge：右键书签栏 → 添加网页；名称填「导入个人娱乐档案」，网址粘贴刚复制的脚本。之后在 TMDB 或优书网详情页点击该书签即可。</div>
       </div>
-      <textarea id="tmdbJson" class="reason tmdb-json" spellcheck="false" placeholder="在这里粘贴 TMDB 书签生成的 JSON">${esc(a.tmdbRaw || "")}</textarea>
+      <textarea id="tmdbJson" class="reason tmdb-json" spellcheck="false" placeholder="${esc(placeholder)}">${esc(a.tmdbRaw || "")}</textarea>
       <div class="tmdb-actions">
-        <button class="btn btn-primary btn-sm" id="tmdbPreviewBtn">预览资料</button>
+        <button class="btn btn-primary btn-sm" id="tmdbPreviewBtn">${previewLabel}</button>
         <button class="btn btn-ghost btn-sm" id="tmdbClearBtn">清空</button>
-        <span class="tmdb-import-note">只读预览；不会直接写入作品库</span>
+        <span class="tmdb-import-note">${esc(importNote)}</span>
       </div>
       <div class="tmdb-preview" id="tmdbPreview">${a.tmdbPreview ? tmdbPreviewHTML(a) : ""}</div>
     </div>`;
@@ -974,6 +987,10 @@ function tmdbImportHTML(a) {
 
 function tmdbSearchUrl(keyword) {
   return "https://www.themoviedb.org/search?query=" + encodeURIComponent(keyword);
+}
+
+function youshuSearchUrl(keyword) {
+  return "https://www.youshu.me/modules/article/search.php?searchtype=all&searchkey=" + encodeURIComponent(keyword);
 }
 
 function currentTmdbTitle(a) {
@@ -1011,6 +1028,24 @@ function syncTmdbSearchLink(a) {
   }
 }
 
+function syncYoushuSearchLink(a) {
+  const link = el("#youshuSearchLink");
+  const hint = el("#youshuSearchHint");
+  if (!link || !hint) return;
+  const keyword = currentTmdbTitle(a);
+  if (keyword) {
+    link.href = youshuSearchUrl(keyword);
+    link.removeAttribute("aria-disabled");
+    link.classList.remove("is-disabled");
+    hint.textContent = "使用当前标题搜索优书网，在新标签页打开";
+  } else {
+    link.removeAttribute("href");
+    link.setAttribute("aria-disabled", "true");
+    link.classList.add("is-disabled");
+    hint.textContent = "当前没有标题，请先在搜索框输入作品标题";
+  }
+}
+
 async function copyPlainText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     try {
@@ -1031,20 +1066,20 @@ async function copyPlainText(text) {
   if (!ok) throw new Error("浏览器拒绝复制");
 }
 
-async function copyTmdbBookmarklet() {
+async function copyImportBookmarklet() {
   const btn = el("#tmdbCopyBookmarklet");
   if (btn) { btn.disabled = true; btn.textContent = "读取中…"; }
   try {
-    const res = await fetch("/static/tmdb-bookmarklet.js", { cache: "no-store" });
-    if (!res.ok) throw new Error("读取书签脚本失败");
+    const res = await fetch("/static/import-bookmarklet.js", { cache: "no-store" });
+    if (!res.ok) throw new Error("读取统一书签脚本失败");
     const code = (await res.text()).trim();
-    if (!code) throw new Error("书签脚本为空");
+    if (!code) throw new Error("统一书签脚本为空");
     await copyPlainText("javascript:" + code);
-    toast("书签脚本已复制。请新建书签「TMDB→项目」，把脚本粘贴到网址栏");
+    toast("统一书签已复制。请新建书签「导入个人娱乐档案」，把脚本粘贴到网址栏");
   } catch (e) {
-    toast("复制书签脚本失败：" + (e && e.message ? e.message : "未知错误"), true);
+    toast("复制统一书签失败：" + (e && e.message ? e.message : "未知错误"), true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "复制书签脚本"; }
+    if (btn) { btn.disabled = false; btn.textContent = "复制统一书签"; }
   }
 }
 
@@ -1103,6 +1138,157 @@ function tmdbPreviewHTML(a) {
     </div>`;
 }
 
+function safeExternalUrl(url) {
+  const s = String(url || "").trim();
+  return /^https?:\/\//i.test(s) ? s : "";
+}
+
+function draftCoverSrc(draft) {
+  const d = draft || {};
+  const remote = d.previewUrl || d.coverUrl || "";
+  if (remote) return remote;
+  const local = String(d.cover || "").trim();
+  if (!local) return "";
+  if (/^https?:\/\//i.test(local)) return local;
+  return local.startsWith("/") ? local : "/" + local.replace(/^\.?\//, "");
+}
+
+function youshuPreviewHTML(a) {
+  const p = a.youshuPreview;
+  if (!p || !p.draft) return "";
+  const d = p.draft;
+  const target = p.target;
+  const match = p.match;
+  const cover = d.previewUrl || d.coverUrl || (target && target.coverUrl) || "";
+  const author = tmdbCreatorNames(d, ["作者", "原著", "原创", "创作者"]);
+  const platform = tmdbInfoValue(d, ["阅读平台"]);
+  const status = tmdbInfoValue(d, ["状态"]);
+  const words = tmdbInfoValue(d, ["字数"]);
+  const score = tmdbInfoValue(d, ["优书评分"]) || (d.ratingRef == null ? "" : String(d.ratingRef));
+  const votes = tmdbInfoValue(d, ["评分人数"]);
+  const bookCategory = tmdbInfoValue(d, ["分类"]);
+  const readLink = safeExternalUrl(tmdbInfoValue(d, ["原书链接"]));
+  const isEdit = a.mode === "edit";
+  const targetText = target ? `当前作品：${target.title || "未命名"}` : "";
+  const matchText = match && !target ? `已有条目：${match.title || "未命名"}${match.source.id ? `（优书 ID ${match.source.id}）` : ""}` : "";
+  const warnings = (p.warnings || []).map(w => `<div class="tmdb-warning">${esc(w)}</div>`).join("");
+  const actions = isEdit
+    ? `<button class="btn btn-primary btn-sm" id="youshuMerge">只补空字段并填入表单</button>
+       <button class="btn btn-ghost btn-sm" id="youshuOverwrite">覆盖资料字段（含封面）并填入表单</button>`
+    : `<button class="btn btn-primary btn-sm" id="youshuUse">使用这份资料并继续</button>`;
+  const help = isEdit
+    ? `<div class="tmdb-merge-help">「只补空字段」保留已有非空资料和已有封面；「覆盖资料字段（含封面）」用优书网的非空标题、简介、标签、作者、infobox 和有效封面替换，评分、阅读经历、我的字段和系列仍保留。封面下载失败时保留旧封面。确认后只填入表单，仍需点击「保存修改」。</div>`
+    : `<div class="tmdb-merge-help">确认后把资料填入下方表单，不会自动保存；仍需点击「保存作品」。缺失的字段保持为空，不推断年份、原名或别名。</div>`;
+  return `
+    <div class="tmdb-preview-card">
+      <div class="tmdb-preview-cover">${cover ? `<img src="${esc(cover)}" alt="" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>优书网</span></div>`}</div>
+      <div class="tmdb-preview-main">
+        <div class="tmdb-preview-title">${esc(d.title || "未命名")} <span class="tmdb-kind">网文</span></div>
+        <div class="tmdb-preview-meta">${esc([`优书 ID ${d.source.id}`, platform, bookCategory].filter(Boolean).join(" · "))}${targetText ? ` · ${esc(targetText)}` : ""}${matchText ? ` · ${esc(matchText)}` : ""}</div>
+        ${d.summary ? `<div class="tmdb-preview-summary">${esc(d.summary)}</div>` : `<div class="tmdb-preview-summary muted">没有简介</div>`}
+        <div class="tmdb-preview-facts">
+          ${author ? `<div><b>作者</b>${esc(author)}</div>` : ""}
+          ${status ? `<div><b>连载状态</b>${esc(status)}</div>` : ""}
+          ${words ? `<div><b>字数</b>${esc(words)}</div>` : ""}
+          ${score ? `<div><b>优书评分</b>${esc(score)}${votes ? `（${esc(votes)} 人）` : ""}</div>` : ""}
+          ${d.tags && d.tags.length ? `<div><b>标签</b>${esc(d.tags.join("、"))}</div>` : ""}
+          ${readLink ? `<div><b>原书</b><a href="${esc(readLink)}" target="_blank" rel="noopener noreferrer">${esc(readLink)}</a></div>` : ""}
+        </div>
+        ${warnings}
+        ${help}
+        <div class="tmdb-preview-actions">
+          ${actions}
+          <span class="tmdb-import-note">确认前不会写入任何资料</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindYoushuPreview(a) {
+  const use = el("#youshuUse");
+  if (use) use.onclick = () => applyYoushuDraft("merge");
+  const merge = el("#youshuMerge");
+  if (merge) merge.onclick = () => applyYoushuDraft("merge");
+  const overwrite = el("#youshuOverwrite");
+  if (overwrite) overwrite.onclick = () => applyYoushuDraft("overwrite");
+}
+
+function mergeYoushuInfobox(current, incoming, overwrite) {
+  const out = Array.isArray(current) ? JSON.parse(JSON.stringify(current)) : [];
+  const index = new Map();
+  out.forEach((item, i) => {
+    if (item && item.key) index.set(String(item.key), i);
+  });
+  (incoming || []).forEach(item => {
+    if (!item || !item.key || !item.value) return;
+    const key = String(item.key);
+    const i = index.get(key);
+    if (i == undefined) {
+      out.push({ key, value: item.value });
+      index.set(key, out.length - 1);
+    } else if (overwrite || !out[i].value) {
+      out[i] = { key, value: item.value };
+    }
+  });
+  return out;
+}
+
+function applyYoushuDraft(mode) {
+  const a = S.add;
+  const p = a.youshuPreview;
+  if (!p || !p.draft) return;
+  const d = JSON.parse(JSON.stringify(p.draft));
+  const overwrite = mode === "overwrite";
+  if (a.mode === "edit") {
+    const out = JSON.parse(JSON.stringify(a.draft || {}));
+    if (overwrite) {
+      if (d.title) out.title = d.title;
+      if (d.summary) out.summary = d.summary;
+      if (d.tags && d.tags.length) out.tags = d.tags;
+      if (d.creators && d.creators.length) out.creators = d.creators;
+      out.infobox = mergeYoushuInfobox(out.infobox, d.infobox, true);
+      out.source = d.source;
+    } else {
+      if (!out.title) out.title = d.title;
+      if (!out.summary) out.summary = d.summary;
+      if (!(out.tags || []).length) out.tags = d.tags;
+      if (!(out.creators || []).length) out.creators = d.creators;
+      out.infobox = mergeYoushuInfobox(out.infobox, d.infobox, false);
+      if (!out.source || !(out.source.name) || out.source.name === "manual") out.source = d.source;
+    }
+    // 「只补空字段」只补空白封面；「覆盖资料字段」在优书网提供有效封面时明确替换。
+    if (overwrite) {
+      if (d.coverUrl) {
+        out.cover = "";
+        out.coverUrl = d.coverUrl;
+        out.previewUrl = d.previewUrl;
+        out.coverReferer = d.coverReferer;
+        out.coverProxy = false;
+      }
+    } else if (!out.cover && !out.coverUrl && d.coverUrl) {
+      out.coverUrl = d.coverUrl;
+      out.previewUrl = d.previewUrl;
+      out.coverReferer = d.coverReferer;
+      out.coverProxy = false;
+    }
+    a.draft = out;
+    a.youshuApplied = { mode: overwrite ? "overwrite" : "merge", draft: d };
+  } else {
+    a.draft = d;
+    a.youshuApplied = { mode: "new", draft: d };
+  }
+  a.tmdbRaw = "";
+  a.tmdbPreview = null;
+  a.youshuRaw = "";
+  a.youshuPreview = null;
+  a.step = 3;
+  renderAdd();
+  toast(a.mode === "edit"
+    ? "已填入表单，请检查后点击「保存修改」"
+    : "已填入表单，请检查后点击「保存作品」");
+}
+
+
 function bindTmdbPreview(a) {
   const use = el("#tmdbUse");
   if (use) use.onclick = () => useTmdbDraft("merge");
@@ -1121,28 +1307,109 @@ function bindTmdbImport(a) {
   const clear = el("#tmdbClearBtn");
   const copyBookmark = el("#tmdbCopyBookmarklet");
   if (preview) preview.onclick = previewTmdb;
-  if (copyBookmark) copyBookmark.onclick = copyTmdbBookmarklet;
+  if (copyBookmark) copyBookmark.onclick = copyImportBookmarklet;
   if (clear) clear.onclick = () => {
     a.tmdbRaw = "";
     a.tmdbPreview = null;
+    a.youshuRaw = "";
+    a.youshuPreview = null;
+    a.youshuApplied = null;
     const input = el("#tmdbJson");
     if (input) input.value = "";
     const out = el("#tmdbPreview");
     if (out) out.innerHTML = "";
     syncTmdbSearchLink(a);
+    syncYoushuSearchLink(a);
   };
   ["#fTitle", "#rfKeyword", "#addKeyword"].forEach(selector => {
     const input = el(selector);
-    if (input) input.addEventListener("input", () => syncTmdbSearchLink(a));
+    if (input) input.addEventListener("input", () => {
+      syncTmdbSearchLink(a);
+      syncYoushuSearchLink(a);
+    });
   });
   syncTmdbSearchLink(a);
+  syncYoushuSearchLink(a);
   bindTmdbPreview(a);
+}
+
+function pasteSourceInfo(raw) {
+  try {
+    const draft = JSON.parse(raw);
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return null;
+    const source = draft.source && typeof draft.source === "object" ? draft.source : {};
+    return { draft, name: String(source.name || "").trim().toLowerCase() };
+  } catch (e) {
+    return null;
+  }
+}
+
+function showPasteNotice(message) {
+  const out = el("#tmdbPreview");
+  if (out) out.innerHTML = `<div class="tmdb-warning">${esc(message)}</div>`;
+}
+
+async function previewYoushu(raw) {
+  const a = S.add;
+  const btn = el("#tmdbPreviewBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "识别中…"; }
+  const r = await api("/api/youshu/preview", {
+    method: "POST",
+    body: { json: raw, targetId: a.mode === "edit" ? a.editId : null },
+  });
+  if (btn) { btn.disabled = false; btn.textContent = "识别资料"; }
+  if (!r.ok) {
+    a.youshuRaw = "";
+    a.youshuPreview = null;
+    a.tmdbRaw = "";
+    a.tmdbPreview = null;
+    const out = el("#tmdbPreview");
+    if (out) out.innerHTML = `<div class="tmdb-error">${esc(r.error || "校验失败")}</div>`;
+    return toast(r.error || "校验失败", true);
+  }
+  a.youshuRaw = raw;
+  a.youshuPreview = r;
+  a.tmdbRaw = "";
+  a.tmdbPreview = null;
+  const out = el("#tmdbPreview");
+  if (out) out.innerHTML = youshuPreviewHTML(a);
+  bindYoushuPreview(a);
 }
 
 async function previewTmdb() {
   const a = S.add;
   const raw = (el("#tmdbJson").value || "").trim();
-  if (!raw) return toast("请先粘贴 TMDB JSON", true);
+  if (!raw) return toast("请先粘贴资料 JSON", true);
+  const sourceInfo = pasteSourceInfo(raw);
+  const sourceName = sourceInfo ? sourceInfo.name : "";
+  a.youshuRaw = "";
+  a.youshuPreview = null;
+
+  if (sourceName === "youshu") {
+    a.tmdbRaw = "";
+    a.tmdbPreview = null;
+    if (a.category !== "novel") {
+      showPasteNotice("已识别优书网资料，请到网文作品编辑页导入。");
+      return toast("已识别优书网资料，请到网文作品编辑页导入", true);
+    }
+    return previewYoushu(raw);
+  }
+
+  if (a.category !== "movie") {
+    a.tmdbRaw = "";
+    a.tmdbPreview = null;
+    if (sourceName === "tmdb") {
+      showPasteNotice("已识别 TMDB 资料，请到影视作品编辑页导入。");
+      return toast("已识别 TMDB 资料，请到影视作品编辑页导入", true);
+    }
+    if (!sourceInfo) {
+      showPasteNotice("JSON 格式错误，无法识别来源。");
+      return toast("JSON 格式错误，无法识别来源", true);
+    }
+    showPasteNotice("当前分类不支持剪贴板资料导入。");
+    return toast("当前分类不支持剪贴板资料导入", true);
+  }
+
   const btn = el("#tmdbPreviewBtn");
   if (btn) { btn.disabled = true; btn.textContent = "校验中…"; }
   const r = await api("/api/tmdb/preview", {
@@ -1242,7 +1509,7 @@ async function saveTmdbCreate() {
 /* ------------------------------------------------------------ 新增 / 编辑 */
 function openAdd() {
   if (!modalIsOpen("#addModal")) rememberOverlayFocus();
-  S.add = { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge" };
+  S.add = { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge", youshuRaw: "", youshuPreview: null, youshuApplied: null };
   setModalState("#addModal", true);
   renderAdd();
   focusAfterRender("#addBody .cat-choice, #addBody input");
@@ -1255,7 +1522,7 @@ function closeAdd() {
 
 function openEdit(w) {
   if (!modalIsOpen("#addModal")) rememberOverlayFocus();
-  S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge" };
+  S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge", youshuRaw: "", youshuPreview: null, youshuApplied: null };
   setModalState("#addModal", true);
   renderAdd();
   focusAfterRender("#fTitle");
@@ -1282,7 +1549,7 @@ function renderAdd() {
     const sources = cat.sources || ["douban"];
     body.innerHTML = `
       <div class="source-row">${sources.map((s, i) => `<button class="source-tab ${a.source === s ? "active" : ""}" data-src="${s}" aria-pressed="${a.source === s}">${esc(S.sourceLabels[s] || s)}${i === 0 ? " · 主" : ""}</button>`).join("")}</div>
-      ${a.category === "movie" ? tmdbImportHTML(a) : ""}
+      ${supportsUnifiedBookmarklet(a.category) ? tmdbImportHTML(a) : ""}
       <div class="search-row">
         <input id="addKeyword" placeholder="输入作品名，例如 诡秘之主 / 进击的巨人 / 艾尔登法环">
         <button class="btn btn-primary" id="addSearch">${ICONS.search} 搜索</button>
@@ -1298,7 +1565,7 @@ function renderAdd() {
     el("#addKeyword").onkeydown = e => { if (e.key === "Enter") doSearch(); };
     el("#parseLink").onclick = doParseLink;
     el("#addLink").onkeydown = e => { if (e.key === "Enter") doParseLink(); };
-    if (a.category === "movie") bindTmdbImport(a);
+    if (supportsUnifiedBookmarklet(a.category)) bindTmdbImport(a);
     renderResults();
     el("#addFoot").innerHTML = `<button class="btn btn-ghost" id="addBack">${ICONS.back} 上一步</button><button class="btn" id="addManual">跳过，手动填写</button>`;
     el("#addBack").onclick = () => { a.step = 1; renderAdd(); };
@@ -1373,15 +1640,17 @@ function renderForm() {
   const rfCur = rfSources.includes(a.refSource) ? a.refSource : (rfSources[0] || "");
   const extPlatforms = EXTERNAL_SEARCH_PLATFORMS[cat] || [];
   const extTitle = (d.title || "").trim();
+  const coverSrc = draftCoverSrc(d);
+  const hasCover = Boolean(coverSrc);
   const extHint = extTitle
     ? "在新标签页打开平台搜索；找到作品后复制详情页链接，粘贴到下方解析。"
     : "当前标题为空，填写标题后即可使用站外搜索。";
   body.innerHTML = `
     <div class="cover-preview" style="margin-bottom:16px">
-      <div class="cp-box">${(d.previewUrl || d.coverUrl) ? `<img id="cpImg" src="${esc(d.previewUrl || d.coverUrl)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
+      <div class="cp-box">${hasCover ? `<img id="cpImg" src="${esc(coverSrc)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
       <div class="cp-info">
         <div>封面来自：${esc((d.source && (d.source.label || d.source.name)) || "手动")}</div>
-        <div>${d.coverUrl ? "保存时会下载到本地，断网也能显示" : "没有封面，卡片会显示分类占位图"}</div>
+        <div>${d.coverUrl ? "保存时会下载到本地，断网也能显示" : (d.cover ? "已有本地封面，保存时保留" : "没有封面，卡片会显示分类占位图")}</div>
         <div style="margin-top:6px"><input id="coverUrlInput" class="reason" style="width:100%" placeholder="可粘贴封面图片 URL 替换" value=""></div>
       </div>
     </div>
@@ -1411,7 +1680,7 @@ function renderForm() {
         <h4>重新获取作品信息</h4>
         <span class="hint">覆盖标题 / 原名 / 年份 / 标签 / 简介 / 来源字段 / 封面；评分、经历、我的字段保留</span>
       </div>
-      ${a.category === "movie" ? tmdbImportHTML(a) : ""}
+      ${supportsUnifiedBookmarklet(a.category) ? tmdbImportHTML(a) : ""}
       <div class="source-row" id="rfSources">${rfSources.map(s =>
         `<button class="source-tab ${rfCur === s ? "active" : ""}" data-rfsrc="${s}" aria-pressed="${rfCur === s}">${esc(S.sourceLabels[s] || s)}</button>`).join("")}</div>
       <div class="search-row">
@@ -1578,6 +1847,16 @@ async function saveWork() {
   if (a.mode === "edit") {
     const payload = { title: draft.title, originalTitle: draft.originalTitle, year: draft.year, tags: draft.tags, summary: draft.summary, creators: draft.creators };
     if (coverInput && coverInput.value.trim()) payload.cover = coverInput.value.trim();
+    if (a.youshuApplied) {
+      if (draft.source && typeof draft.source === "object") payload.source = draft.source;
+      if (Array.isArray(draft.infobox)) payload.infobox = draft.infobox;
+      if (!draft.cover && /^https?:\/\//i.test(draft.coverUrl || "")) {
+        // PATCH 会先继承现有的空 cover 字段；这里直接传 cover，避免 normalize_work 把空 cover 当成已指定而跳过 coverUrl。
+        payload.cover = draft.coverUrl;
+        payload.coverReferer = draft.coverReferer || "";
+        payload.coverProxy = false;
+      }
+    }
     const r = await api(`/api/works/${a.editId}`, { method: "PATCH", body: payload });
     if (!r.ok) return toast(r.error || "保存失败", true);
     applyWork(r.work); closeAdd(); renderDrawer(); renderWall(); toast("已保存");
