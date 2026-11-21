@@ -1,0 +1,156 @@
+/* Shared presentation layer for the exhibit, detail drawer, and edit form. */
+
+/* Keep the poster wall calm while giving each cover a little depth. */
+.wall.exhibit-grid{
+  gap:24px 20px;
+}
+.wall.exhibit-grid .exhibit-work,
+.wall.exhibit-grid .exhibit-series{
+  border-radius:12px;
+  box-shadow:0 5px 18px color-mix(in srgb,var(--lenso-glass-shadow) 28%,transparent),
+    inset 0 0 0 1px color-mix(in srgb,var(--exhibit-card-border) 55%,transparent);
+}
+.exhibit-cover > img{
+  transition:transform 500ms var(--lenso-ease-fluid),opacity var(--lenso-duration);
+}
+@media (hover:hover) and (pointer:fine){
+  .wall.exhibit-grid .exhibit-work:hover,
+  .wall.exhibit-grid .exhibit-series:hover{
+    transform:translateY(-4px);
+    box-shadow:0 14px 30px color-mix(in srgb,var(--lenso-glass-shadow) 36%,transparent),
+      inset 0 0 0 1px color-mix(in srgb,var(--exhibit-card-border) 72%,transparent);
+  }
+  .wall.exhibit-grid .exhibit-work:hover .exhibit-cover > img{transform:scale(1.035)}
+}
+.exhibit-label{
+  padding:13px 13px 12px;
+  gap:7px;
+}
+.exhibit-title{line-height:1.45}
+.exhibit-meta{min-height:1.4em}
+.exhibit-status{padding:3px 7px;border-radius:5px}
+.exhibit-series-info{gap:8px;padding-top:12px}
+.exhibit-series-title{line-height:1.35}
+.exhibit-series-launch{
+  align-self:flex-start;
+  min-height:30px;
+  margin-top:3px;
+  padding:0 10px;
+  border:1px solid var(--exhibit-card-border);
+  border-radius:7px;
+  background:color-mix(in srgb,var(--exhibit-card-surface) 84%,var(--exhibit-progress-fill));
+  color:var(--exhibit-card-text);
+  font:500 11px/1 var(--lenso-font-ui);
+  transition:background var(--lenso-duration-fast),border-color var(--lenso-duration-fast),transform var(--lenso-duration-fast);
+}
+.exhibit-series-launch:hover{
+  border-color:color-mix(in srgb,var(--exhibit-progress-fill) 55%,var(--exhibit-card-border));
+  background:color-mix(in srgb,var(--exhibit-card-surface) 72%,var(--exhibit-progress-fill));
+}
+.exhibit-series-launch:active{transform:scale(.98)}
+.exhibit-series-launch:focus-visible{outline:var(--lenso-focus-width) solid var(--lenso-focus-ring);outline-offset:2px}
+
+/* Details read as one continuous document, with clear section stops. */
+#drawerBody > .section{
+  margin:0;
+  padding:22px 8px;
+  border:0;
+  border-bottom:1px solid color-mix(in srgb,var(--lenso-separator) 78%,transparent);
+  border-radius:0;
+  background:transparent;
+  box-shadow:none;
+}
+#drawerBody > .section:first-child{padding-top:4px}
+#drawerBody > .section:last-child{border-bottom:0}
+#drawerBody .section-head{gap:12px;margin-bottom:16px}
+#drawerBody .section-head h3{font-size:15px}
+#drawerBody .section-head .line{
+  display:block;
+  flex:1;
+  min-width:12px;
+  height:1px;
+  background:color-mix(in srgb,var(--lenso-separator) 80%,transparent);
+}
+#drawerBody .section-head .hint{max-width:48%;font-size:11px}
+#drawerBody .rating-big{font-size:48px}
+#drawerBody .rating-big.none{font-size:18px}
+#drawerBody .rating-top{gap:18px;margin-bottom:16px}
+#drawerBody .timeline{padding-left:24px}
+#drawerBody .tl-item{padding-bottom:20px}
+#drawerBody .drawer-actions{
+  display:flex;
+  gap:9px;
+  flex-wrap:wrap;
+  padding:20px 0 4px;
+}
+
+/* Edit form hierarchy and its always-visible save controls. */
+#addBody > .cover-preview{
+  align-items:center;
+  padding:14px;
+  border:1px solid color-mix(in srgb,var(--lenso-separator) 72%,transparent);
+  border-radius:12px;
+  background:color-mix(in srgb,var(--lenso-fill-quaternary) 76%,transparent);
+}
+#addBody .form-grid{gap:16px 20px}
+#addBody .form-section-title{
+  display:flex;
+  grid-column:1/-1;
+  align-items:baseline;
+  gap:10px;
+  margin-top:8px;
+  padding:0 0 9px;
+  border-bottom:1px solid color-mix(in srgb,var(--lenso-separator) 82%,transparent);
+}
+#addBody .form-section-title:not(:first-child){margin-top:10px;padding-top:12px}
+#addBody .form-section-title span{font-size:15px;line-height:1.4;font-weight:600;color:var(--lenso-label-primary)}
+#addBody .form-section-title small{font-size:11px;line-height:1.5;color:var(--lenso-label-tertiary)}
+#addBody .form-item{gap:7px}
+#addBody .form-item label{font-size:12px}
+#addBody .form-item textarea{line-height:1.75}
+#addBody .refill-box{margin-top:24px;border:1px solid color-mix(in srgb,var(--lenso-separator) 66%,transparent)}
+#addModal .modal-foot{
+  position:relative;
+  z-index:1;
+  padding-top:15px;
+  padding-bottom:15px;
+  box-shadow:0 -8px 22px color-mix(in srgb,var(--lenso-glass-shadow) 16%,transparent);
+}
+#addModal .modal-foot .btn-primary{min-width:112px}
+
+@media (max-width:760px){
+  .wall.exhibit-grid{gap:19px 13px}
+  .exhibit-label{padding:10px;gap:6px}
+  .exhibit-series-info{gap:7px;padding-top:8px}
+  .exhibit-series-launch{min-height:28px;padding:0 8px;font-size:10.5px}
+  #drawerBody > .section{padding:18px 3px}
+  #drawerBody > .section:first-child{padding-top:2px}
+  #drawerBody .section-head{gap:8px;margin-bottom:13px}
+  #drawerBody .section-head .hint{max-width:52%;font-size:10px}
+  #drawerBody .section-head .line{min-width:6px}
+  #drawerBody .rating-big{font-size:42px}
+  #addBody > .cover-preview{padding:11px}
+  #addBody .form-grid{gap:14px}
+  #addBody .form-section-title{flex-wrap:wrap;gap:3px 9px}
+  #addBody .form-section-title:not(:first-child){margin-top:7px;padding-top:11px}
+  #addModal .modal-foot{padding:11px 16px calc(11px + env(safe-area-inset-bottom,0px))}
+}
+
+@media (max-width:420px){
+  .wall.exhibit-grid{gap:16px 10px}
+  .exhibit-label{padding:9px 8px 10px}
+  .exhibit-series-visual{flex-basis:32%;margin-right:0}
+  .exhibit-series-info{gap:6px}
+  .exhibit-kind{right:9px;top:8px}
+  #drawerBody > .section{padding:16px 1px}
+  #drawerBody .section-head .hint{max-width:46%;font-size:9.5px}
+  #drawerBody .rating-top{gap:12px}
+  #addBody > .cover-preview{align-items:flex-start}
+  #addBody .form-section-title small{flex-basis:100%}
+  #addModal .modal-foot .btn{min-width:0}
+  #addModal .modal-foot .btn-primary{min-width:104px}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .exhibit-cover > img,.exhibit-series-launch{transition:none}
+}

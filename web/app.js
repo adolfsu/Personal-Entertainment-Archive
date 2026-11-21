@@ -39,6 +39,7 @@ const S = {
   version: "", works: [], series: [], seriesKinds: {}, seriesRoles: {}, settings: {}, categories: [], sourceLabels: {},
   filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
   currentId: null, currentSeriesId: null,
+  view: "home",
   drawerRating: 8, seriesRating: 8,
   add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, youshuRaw: "", youshuPreview: null, youshuApplied: null },
   seriesDraft: { mode: "create", attachTo: null },
@@ -270,11 +271,13 @@ async function boot() {
   S.sourceLabels = data.sourceLabels || {};
   window.__proxy = data.proxyActive || "未探测到可用代理";
   updateUndoBtn();
+  setAppView("home", false);
   if (S.dataState === "corrupt") { showCorrupt(data); return; }
   renderTabs();
   renderStatusChips();
   renderWall();
   renderStats();
+  renderHome();
   bindGlobal();
 }
 
@@ -372,7 +375,7 @@ async function refreshSnapshot(afterMutation) {
   if (S.currentSeriesId && !seriesById(S.currentSeriesId)) closeDrawer();
   updateUndoBtn();
   if (S.dataState === "corrupt") { showCorrupt(b); return false; }
-  renderTabs(); renderStatusChips(); renderWall(); renderStats();
+  renderTabs(); renderStatusChips(); renderWall(); renderStats(); renderHome();
   if (S.currentId || S.currentSeriesId) renderDrawer();
   if (immersiveView) immersiveView.refresh();
   return true;
@@ -507,23 +510,25 @@ function ensureImmersive() {
       getLabels: work => ({ category: catLabel(work.category), status: statusLabel(work), series: seriesNameOf(work),
         recordStatus: status => ((S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS)[status] || status }),
       openDetails: openDrawer, closeDetails: () => closeDrawer({ skipImmersive: true }),
-      mainRoots: () => elAll("body > .topbar, body > .filters, body > .stats, body > .wall-tools, body > .wall-wrap, body > .sync-notice, body > .skip-link"),
+      mainRoots: () => [el("#topbar"), el("#appSidebar"), el("#sidebarScrim"), el(".skip-link"), el("#homeView"), el("#archiveView"), el("#backdrop"), el("#drawer")].filter(Boolean),
       captureOrigin: workId => {
         const active = document.activeElement;
         const cards = elAll("#wall .card, #wall .series-card");
         const work = findWork(workId);
-        const anchor = active.closest(".card, .series-card") || cards.find(card => card.dataset.id === workId || card.dataset.sid === workId || card.dataset.sid === work?.primarySeriesId);
-        return { scrollY: window.scrollY, focusId: active.id,
+        const homeAnchor = active.closest(".home-slide") || elAll(".home-slide").find(slide => slide.dataset.id === workId);
+        const anchor = homeAnchor || active.closest(".card, .series-card") || cards.find(card => card.dataset.id === workId || card.dataset.sid === workId || card.dataset.sid === work?.primarySeriesId);
+        return { view: S.view, scrollY: window.scrollY, focusId: active.id,
           workId: anchor?.dataset.id, seriesId: anchor?.dataset.sid, offset: anchor?.getBoundingClientRect().top };
       },
       restoreOrigin: saved => requestAnimationFrame(() => {
         if (!saved) return;
-        const cards = elAll("#wall .card, #wall .series-card");
+        setAppView(saved.view || "archive", false);
+        const cards = elAll("#wall .card, #wall .series-card, .home-slide");
         const anchor = cards.find(card => saved.workId ? card.dataset.id === saved.workId : saved.seriesId && card.dataset.sid === saved.seriesId);
         if (anchor && saved.offset != null) window.scrollTo(0, window.scrollY + anchor.getBoundingClientRect().top - saved.offset);
         else window.scrollTo(0, saved.scrollY);
         const target = (saved.focusId && document.getElementById(saved.focusId)) ||
-          anchor || el("#enterExhibit");
+          anchor || el(saved.view === "home" ? "#homeContinueBtn" : "#enterExhibit");
         target?.focus({ preventScroll: true });
       }),
     });
@@ -541,6 +546,181 @@ function renderStats() {
     avg != null ? `<span><b>${avg.toFixed(2)}</b>平均分</span>` : "",
     `<span><b>${active}</b>部进行中</span>`,
   ].join("");
+}
+
+/* ------------------------------------------------------------ 首页进行中作品 */
+let homeHiddenDraft = null;
+
+function activeHomeWorks() {
+  return ArchiveV2.homeFeed.activeWorks(S.works, S.settings?.home_hidden_work_ids);
+}
+
+function homeRecentRecord(work) {
+  return (work.experiences || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0] || null;
+}
+
+function homeProgress(work) {
+  const fields = (work.userFields || []).filter(field => /^(进度|阅读进度|观看进度|游玩进度|当前进度|当前集数|当前章节|完成进度|已读章节|已看集数)$/.test(field.key || "")).slice(0, 2);
+  return fields.map(field => `<div class="home-progress"><span>${esc(field.key)}</span><strong>${esc(field.value)}</strong></div>`).join("");
+}
+
+function homeSlideHTML(work, index, total, featured = false) {
+  const record = homeRecentRecord(work);
+  const count = `${String(index + 1).padStart(2, "0")} <span>/ ${String(total).padStart(2, "0")}</span>`;
+  const image = work.coverUrl
+    ? `<div class="home-art" aria-hidden="true"><img class="home-art-glow" src="${esc(work.coverUrl)}" alt="" loading="${index > 1 ? "lazy" : "eager"}" data-home-cover><img class="home-art-cover" src="${esc(work.coverUrl)}" alt="" loading="${index > 1 ? "lazy" : "eager"}" data-home-cover></div>`
+    : `<div class="home-art home-art-empty" aria-hidden="true"><span>${esc(catLabel(work.category))}</span><small>暂无封面</small></div>`;
+  return `<article class="home-slide${featured ? " is-featured" : ""}" data-id="${esc(work.id)}" tabindex="-1" aria-label="进行中作品：${esc(work.title)}">
+    ${image}
+    <div class="home-slide-shade" aria-hidden="true"></div>
+    <div class="home-slide-content">
+      <div class="home-slide-top"><span class="home-kicker">${featured ? "CONTINUE WHERE YOU LEFT OFF" : "IN PROGRESS"}</span><span class="home-index">${count}</span></div>
+      <div class="home-work-meta"><span>${esc(catLabel(work.category))}</span>${work.year ? `<span>${esc(work.year)}</span>` : ""}<span class="home-status">${esc(statusLabel(work))}</span></div>
+      <h${featured ? "1" : "2"} class="home-work-title">${esc(work.title || "未命名作品")}</h${featured ? "1" : "2"}>
+      ${work.originalTitle && work.originalTitle !== work.title ? `<p class="home-original-title">${esc(work.originalTitle)}</p>` : ""}
+      ${work.summary ? `<p class="home-summary">${esc(work.summary.length > 180 ? `${work.summary.slice(0, 180)}…` : work.summary)}</p>` : ""}
+      <div class="home-personal-row">${work.rating != null ? `<span class="home-rating"><b>${fmtScore(work.rating)}</b><small>/ 10 个人评分</small></span>` : `<span class="home-rating home-unrated">尚未评分</span>`}${homeProgress(work)}</div>
+      ${record ? `<div class="home-record"><time>${esc(record.date || "最近记录")}</time><span>${esc(record.content || statusLabel(work))}</span></div>` : ""}
+      <div class="home-slide-actions">
+        <button class="btn btn-primary" data-home-action="immersive" data-home-id="${esc(work.id)}">沉浸浏览 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+        <button class="btn" data-home-action="details" data-home-id="${esc(work.id)}">作品详情</button>
+        <button class="home-hide-btn" data-home-action="hide" data-home-id="${esc(work.id)}" title="从首页隐藏" aria-label="从首页隐藏《${esc(work.title)}》"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-6 9-6 9 6 9 6-3.2 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.5"/><path d="m5 5 14 14"/></svg><span>从首页隐藏</span></button>
+      </div>
+      ${featured ? `<div class="home-hero-footer"><span>${total} 部进行中</span><button class="home-manage-link" data-home-action="manage">管理首页作品</button><span class="home-scroll-hint">向下滚动继续浏览</span></div>` : ""}
+    </div>
+  </article>`;
+}
+
+function renderHome() {
+  const hero = el("#homeHero"), feed = el("#homeFeed");
+  if (!hero || !feed || !ArchiveV2.homeFeed) return;
+  const active = activeHomeWorks();
+  if (!active.length) {
+    const hiddenCount = ArchiveV2.homeFeed.hiddenWorks(S.works, S.settings?.home_hidden_work_ids).length;
+    hero.innerHTML = `<div class="home-empty"><p class="home-kicker">PERSONAL ARCHIVE</p><h1>从这里继续</h1><p>${S.works.some(work => work.status === "active") ? "首页作品暂时都已隐藏，可以重新选择需要展示的作品。" : "还没有进行中的作品。去展厅更新作品状态，或先添加一部作品。"}</p><div class="home-slide-actions"><button class="btn btn-primary" data-home-action="archive">打开展厅</button>${hiddenCount ? `<button class="btn" data-home-action="manage">恢复已隐藏作品（${hiddenCount}）</button>` : `<button class="btn" data-home-action="add">添加作品</button>`}</div></div>`;
+    feed.replaceChildren();
+    return;
+  }
+  hero.innerHTML = homeSlideHTML(active[0], 0, active.length, true);
+  feed.innerHTML = active.slice(1).map((work, index) => homeSlideHTML(work, index + 1, active.length)).join("");
+  elAll("[data-home-cover]").forEach(image => {
+    image.onerror = () => { image.hidden = true; };
+    if (image.complete && !image.naturalWidth) image.hidden = true;
+  });
+}
+
+function setAppView(view, scroll = true) {
+  S.view = view === "archive" ? "archive" : "home";
+  const shell = el("#appShell"), home = el("#homeView"), archive = el("#archiveView");
+  if (shell) shell.dataset.view = S.view;
+  if (home) home.hidden = S.view !== "home";
+  if (archive) archive.hidden = S.view !== "archive";
+  document.documentElement.dataset.homeSnap = String(S.view === "home");
+  el("#topbarContext").textContent = S.view === "home" ? "正在进行" : "作品展厅";
+  elAll("[data-app-nav]").forEach(button => {
+    const current = button.dataset.appNav === S.view;
+    if (current) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  closeSidebar();
+  if (scroll) window.scrollTo({ top: 0, behavior: "auto" });
+}
+
+function openHomeImmersive(id) {
+  const list = activeHomeWorks();
+  const currentId = id || list[0]?.id;
+  if (!currentId || !list.some(work => work.id === currentId)) return toast("首页没有可浏览的进行中作品");
+  ensureImmersive();
+  immersiveView.open(list.map(work => work.id), currentId, "fullscreen", "正在进行");
+}
+
+function renderHiddenWorksManager() {
+  const body = el("#hiddenWorksBody");
+  if (!body) return;
+  const hidden = ArchiveV2.homeFeed.normalizeHidden(homeHiddenDraft || []);
+  const active = ArchiveV2.homeFeed.sortRecent(S.works.filter(work => work.status === "active"));
+  const inactiveHidden = ArchiveV2.homeFeed.hiddenWorks(S.works, hidden).filter(work => work.status !== "active");
+  body.innerHTML = `<div class="home-manager-group"><h3>首页展示</h3><p class="muted-note">取消勾选的进行中作品会从首页隐藏，作品状态和展厅内容不变。</p>${active.length ? active.map(work => `<label class="home-manager-row"><span class="home-manager-title">${esc(work.title)}</span><small>${esc(catLabel(work.category))}</small><input type="checkbox" data-home-visible="${esc(work.id)}" ${hidden.includes(work.id) ? "" : "checked"}><span class="home-checkmark"></span></label>`).join("") : `<div class="muted-note">当前没有进行中的作品。</div>`}</div>
+    <div class="home-manager-group"><h3>已隐藏的非进行中作品</h3>${inactiveHidden.length ? inactiveHidden.map(work => `<div class="home-manager-row"><span class="home-manager-title">${esc(work.title)}</span><small>${esc(statusLabel(work))}</small><button class="btn btn-sm" data-home-restore="${esc(work.id)}">移出隐藏名单</button></div>`).join("") : `<div class="muted-note">没有已隐藏的非进行中作品。</div>`}</div>`;
+  elAll("[data-home-visible]", body).forEach(input => input.onchange = () => {
+    homeHiddenDraft = ArchiveV2.homeFeed.setHidden(homeHiddenDraft, input.dataset.homeVisible, !input.checked);
+  });
+  elAll("[data-home-restore]", body).forEach(button => button.onclick = () => {
+    homeHiddenDraft = ArchiveV2.homeFeed.setHidden(homeHiddenDraft, button.dataset.homeRestore, false);
+    renderHiddenWorksManager();
+  });
+}
+
+function openHomeManager() {
+  if (!modalIsOpen("#hiddenWorksModal")) rememberOverlayFocus();
+  homeHiddenDraft = ArchiveV2.homeFeed.normalizeHidden(S.settings?.home_hidden_work_ids);
+  renderHiddenWorksManager();
+  setModalState("#hiddenWorksModal", true);
+  focusAfterRender("#hiddenWorksClose");
+}
+
+function closeHomeManager() {
+  if (!modalIsOpen("#hiddenWorksModal")) return;
+  homeHiddenDraft = null;
+  setModalState("#hiddenWorksModal", false);
+  restoreOverlayFocus();
+}
+
+async function saveHomeManager() {
+  const hidden = ArchiveV2.homeFeed.normalizeHidden(homeHiddenDraft);
+  const button = el("#hiddenWorksSave");
+  button.disabled = true;
+  try {
+    const result = await api("/api/settings", { method: "POST", body: { home_hidden_work_ids: hidden } });
+    if (!result.ok) return toast(result.error || "首页设置保存失败", true);
+    S.settings = result.settings || S.settings;
+    renderHome();
+    closeHomeManager();
+    toast("首页作品设置已保存");
+  } finally { button.disabled = false; }
+}
+
+function openSidebar() {
+  document.body.classList.add("sidebar-open");
+  el("#sidebarScrim").hidden = false;
+  el("#sidebarToggle").setAttribute("aria-expanded", "true");
+  el("#sidebarToggle").setAttribute("aria-label", "关闭导航");
+  el("#sidebarToggle").title = "关闭导航";
+  focusAfterRender("#navHome");
+}
+
+function closeSidebar() {
+  if (!document.body.classList.contains("sidebar-open")) return;
+  document.body.classList.remove("sidebar-open");
+  el("#sidebarScrim").hidden = true;
+  el("#sidebarToggle").setAttribute("aria-expanded", "false");
+  el("#sidebarToggle").setAttribute("aria-label", "打开导航");
+  el("#sidebarToggle").title = "打开导航";
+}
+
+async function setHomeWorkHidden(id, shouldHide, button) {
+  if (button) button.disabled = true;
+  const current = ArchiveV2.homeFeed.normalizeHidden(S.settings?.home_hidden_work_ids);
+  const home_hidden_work_ids = ArchiveV2.homeFeed.setHidden(current, id, shouldHide);
+  try {
+    const result = await api("/api/settings", { method: "POST", body: { home_hidden_work_ids } });
+    if (!result.ok) return toast(result.error || "首页设置保存失败", true);
+    S.settings = result.settings || S.settings;
+    renderHome();
+    toast(shouldHide ? "已从首页隐藏，可在管理中恢复" : "作品已显示在首页");
+  } finally { if (button) button.disabled = false; }
+}
+
+function handleHomeAction(event) {
+  const button = event.target.closest("[data-home-action]");
+  if (!button) return;
+  const action = button.dataset.homeAction, id = button.dataset.homeId;
+  if (action === "immersive") openHomeImmersive(id);
+  else if (action === "details" && id) openDrawer(id);
+  else if (action === "hide" && id) setHomeWorkHidden(id, true, button);
+  else if (action === "manage") openHomeManager();
+  else if (action === "archive") setAppView("archive");
+  else if (action === "add") openAdd();
 }
 
 /* ------------------------------------------------------------ 详情抽屉 */
@@ -752,7 +932,7 @@ function renderDrawer() {
     </div>
   </section>`);
 
-  bodyHTML.push(`<section class="section" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+  bodyHTML.push(`<section class="section drawer-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
     <button class="btn" id="editWork">${ICONS.plus} 编辑信息</button>
     <button class="btn btn-danger" id="deleteWork">删除作品</button>
   </section>`);
@@ -1035,7 +1215,7 @@ function modalIsOpen(selector) {
   return !!(m && m.classList.contains("show"));
 }
 function activeOverlayRoot() {
-  for (const sel of ["#addModal", "#seriesModal", "#settingsModal"]) {
+  for (const sel of ["#addModal", "#seriesModal", "#settingsModal", "#hiddenWorksModal"]) {
     if (modalIsOpen(sel)) return el(`${sel} .modal-box`);
   }
   if (el("#drawer") && el("#drawer").classList.contains("show")) return el("#drawer");
@@ -1823,13 +2003,16 @@ function renderForm() {
       </div>
     </div>
     <div class="form-grid">
+      <div class="form-section-title full"><span>基本资料</span><small>标题、原名、年份、标签与创作者</small></div>
       <div class="form-item"><label>标题</label><input id="fTitle" value="${esc(d.title || "")}"></div>
       <div class="form-item"><label>原名 / 原名副标</label><input id="fOriginal" value="${esc(d.originalTitle || "")}"></div>
       <div class="form-item"><label>年份</label><input id="fYear" value="${esc(d.year || "")}"></div>
       <div class="form-item"><label>标签（逗号分隔）</label><input id="fTags" value="${esc((d.tags || []).join("，"))}"></div>
       <div class="form-item full"><label>创作者（角色：名字，句号分隔）</label><input id="fCreators" value="${esc((d.creators || []).map(c => c.role + "：" + c.name).join("；"))}"></div>
+      <div class="form-section-title full"><span>沉浸体验</span><small>背景图与背景音乐只影响沉浸浏览</small></div>
       <div class="form-item full"><label for="fImmersiveBackgrounds">沉浸背景图片链接（每行一张，最多 20 张）</label><textarea id="fImmersiveBackgrounds" rows="4" placeholder="https://… 横向图片更适合展厅">${esc((d.immersiveBackgroundUrls || (d.immersiveBackgroundUrl ? [d.immersiveBackgroundUrl] : [])).join("\n"))}</textarea><div class="tip">每行一张，调整行顺序即可调整顺序播放。全局播放方式和切换间隔在设置中调整。远程图片需联网显示。</div></div>
       ${ArchiveV2.bgmEditor.form(d, 'workBgm')}
+      <div class="form-section-title full"><span>内容与个人记录</span><small>简介和新建时的初始状态</small></div>
       <div class="form-item full"><label>简介</label><textarea id="fSummary" style="min-height:110px">${esc(d.summary || "")}</textarea></div>
       ${a.mode === "create" ? `
       <div class="form-item"><label>初始评分（可留空）</label>
@@ -2234,6 +2417,16 @@ function bindGlobal() {
   el("#undoBtn").onclick = doUndo;
   el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
+  el("#navHome").onclick = () => setAppView("home");
+  el("#navArchive").onclick = () => setAppView("archive");
+  el("#navImmersive").onclick = () => { closeSidebar(); openImmersive(null, "fullscreen"); };
+  el("#sidebarToggle").onclick = () => document.body.classList.contains("sidebar-open") ? closeSidebar() : openSidebar();
+  el("#sidebarScrim").onclick = closeSidebar;
+  el("#homeView").onclick = handleHomeAction;
+  el("#hiddenWorksClose").onclick = closeHomeManager;
+  el("#hiddenWorksCancel").onclick = closeHomeManager;
+  el("#hiddenWorksSave").onclick = saveHomeManager;
+  el("#hiddenWorksModal").onclick = event => { if (event.target.id === "hiddenWorksModal") closeHomeManager(); };
   elAll("#groupSeg button").forEach(b => {
     b.setAttribute("aria-pressed", b.classList.contains("on"));
     b.onclick = () => {
@@ -2279,8 +2472,10 @@ function bindGlobal() {
       if (el("#addModal").classList.contains("show")) closeAdd();
       else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();
       else if (el("#settingsModal").classList.contains("show")) closeSettings();
+      else if (el("#hiddenWorksModal").classList.contains("show")) closeHomeManager();
       else if (S.currentId || S.currentSeriesId) closeDrawer();
       else if (immersiveView?.isOpen()) immersiveView.close();
+      else if (document.body.classList.contains("sidebar-open")) closeSidebar();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
       const tag = (document.activeElement.tagName || "").toUpperCase();
@@ -2290,7 +2485,7 @@ function bindGlobal() {
       doUndo();
       return;
     }
-    if (e.key === "/" && !activeOverlayRoot() && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+    if (e.key === "/" && S.view === "archive" && !activeOverlayRoot() && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault(); el("#searchInput").focus();
     }
   });

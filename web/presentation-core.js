@@ -5,7 +5,7 @@
       return method !== "GET" && (
         /^\/api\/(works|series)(\/|$)/.test(path) ||
         ["/api/tmdb/import", "/api/import", "/api/import-records", "/api/clear-data",
-          "/api/undo", "/api/backups/restore", "/api/recover/new-start"].includes(path)
+          "/api/undo", "/api/backups/restore", "/api/recover/new-start", "/api/settings"].includes(path)
       );
     },
     createQueue() {

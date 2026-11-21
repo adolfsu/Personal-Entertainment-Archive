@@ -383,7 +383,8 @@ def to_text(v):
 def default_library():
     return {"version": LIB_VERSION, "works": [], "series": [],
             "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30,
-                         "immersive_background_interval": 12, "immersive_background_order": "ordered"}}
+                         "immersive_background_interval": 12, "immersive_background_order": "ordered",
+                         "home_hidden_work_ids": []}}
 
 
 def check_library(lib):
@@ -4335,6 +4336,20 @@ class Handler(BaseHTTPRequestHandler):
     def handle_settings(self, body):
         with _lock:
             lib = load_library()
+            if "home_hidden_work_ids" in body:
+                hidden_ids = body["home_hidden_work_ids"]
+                if not isinstance(hidden_ids, list) or any(not isinstance(work_id, str) for work_id in hidden_ids):
+                    raise ValueError("首页隐藏作品必须是字符串 ID 列表")
+                existing_ids = {str(work.get("id") or "").strip() for work in lib["works"]
+                                if isinstance(work, dict) and str(work.get("id") or "").strip()}
+                normalized_ids = []
+                seen = set()
+                for work_id in hidden_ids:
+                    work_id = work_id.strip()
+                    if work_id and work_id in existing_ids and work_id not in seen:
+                        normalized_ids.append(work_id)
+                        seen.add(work_id)
+                lib["settings"]["home_hidden_work_ids"] = normalized_ids
             for k in ("proxy", "proxy_port", "backup_keep"):
                 if k in body:
                     lib["settings"][k] = body[k]
