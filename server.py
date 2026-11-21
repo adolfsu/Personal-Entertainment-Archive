@@ -73,6 +73,8 @@ VERSION_ASCII = read_version() or "unversioned"
 WEB_DIR = os.path.join(BASE_DIR, "web")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
+AUDIO_DIR = os.path.join(DATA_DIR, "audio")
+AUDIO_LIMIT = 30 * 1024 * 1024
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 DAILY_BACKUP_DIR = os.path.join(BACKUP_DIR, "daily")          # 每日自动备份，只保留最近 15 天
 PRE_RESTORE_DIR = os.path.join(BACKUP_DIR, "pre-restore")     # 恢复/撤销前的安全快照，不参与自动清理
@@ -335,7 +337,7 @@ def new_id(prefix):
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, COVER_DIR, IMAGE_CACHE_DIR, BACKUP_DIR, DAILY_BACKUP_DIR,
+    for d in (DATA_DIR, COVER_DIR, AUDIO_DIR, IMAGE_CACHE_DIR, BACKUP_DIR, DAILY_BACKUP_DIR,
               PRE_RESTORE_DIR, UNDO_USED_DIR, WEB_DIR, LOG_DIR):
         os.makedirs(d, exist_ok=True)
 
@@ -380,7 +382,8 @@ def to_text(v):
 # ---------------------------------------------------------------- 存储层
 def default_library():
     return {"version": LIB_VERSION, "works": [], "series": [],
-            "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30}}
+            "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30,
+                         "immersive_background_interval": 12, "immersive_background_order": "ordered"}}
 
 
 def check_library(lib):
@@ -630,6 +633,7 @@ def load_backup_payload(path):
         data = json.load(f)
     try:
         check_library(data)
+        validate_audio_bindings(data)
     except ValueError as e:
         raise ValueError(str(e))
     lib = fill_library_defaults(data)
@@ -664,6 +668,20 @@ def extract_library_zip(raw):
         data = json.loads(z.read(cands[0]).decode("utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("works"), list):
             raise RuntimeError("zip 里的 library.json 格式不正确")
+        validate_audio_bindings(data)
+        # 音频按内容寻址，先校验全部待恢复文件，避免半途遇到坏文件。
+        audio_files = {}
+        for info in z.infolist():
+            norm = info.filename.replace("\\", "/")
+            if "/audio/" not in "/" + norm:
+                continue
+            name = norm.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[a-f0-9]{64}\.mp3", name) or info.file_size > AUDIO_LIMIT:
+                raise ValueError("备份音频文件名或大小不合法")
+            payload = z.read(info)
+            if hashlib.sha256(payload).hexdigest() + ".mp3" != name or not is_mp3(payload):
+                raise ValueError("备份音频校验失败")
+            audio_files[name] = payload
         restored = 0
         for n in names:
             norm = n.replace("\\", "/")
@@ -684,6 +702,10 @@ def extract_library_zip(raw):
             with open(dst, "wb") as f:
                 f.write(payload)
             restored += 1
+        for name, payload in audio_files.items():
+            dst = os.path.join(AUDIO_DIR, name)
+            if not os.path.exists(dst):
+                atomic_write_bytes(dst, payload)
     return data, restored
 
 
@@ -2226,7 +2248,119 @@ def parse_hongguo_link(url):
 
 
 # ---------------------------------------------------------------- 草稿 → 作品
+def validate_immersive_background(value):
+    """背景仅保存用户提供的链接，不抓取、不下载、不覆盖封面。"""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or len(value) > 4096:
+        raise ValueError("沉浸背景链接必须是 4096 字以内的网址")
+    value = value.strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+        valid = (parsed.scheme.lower() in ("http", "https") and parsed.netloc and parsed.hostname
+                 and not parsed.username and not parsed.password and parsed.port != 0)
+    except ValueError:
+        valid = False
+    if not valid or re.search(r"[\s\x00-\x1f\x7f]", value):
+        raise ValueError("沉浸背景请填写完整的 HTTP 或 HTTPS 图片链接")
+    return value
+
+
+def apply_immersive_background(target, payload):
+    if "immersiveBackgroundUrls" in payload or "immersiveBackgroundUrl" in payload:
+        raw = payload.get("immersiveBackgroundUrls")
+        if raw is None:
+            raw = [payload.get("immersiveBackgroundUrl", "")]
+        if not isinstance(raw, list) or len(raw) > 20:
+            raise ValueError("沉浸背景最多添加 20 张图片")
+        values = []
+        for item in raw:
+            value = validate_immersive_background(item)
+            if value and value not in values:
+                values.append(value)
+        if values:
+            target["immersiveBackgroundUrls"] = values
+            target["immersiveBackgroundUrl"] = values[0]
+        else:
+            target.pop("immersiveBackgroundUrls", None)
+            target.pop("immersiveBackgroundUrl", None)
+
+
+def validate_bgm(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("背景音乐配置格式不正确")
+    src, title = value.get("src", ""), value.get("title", "")
+    if not isinstance(src, str) or not isinstance(title, str) or len(title) > 200:
+        raise ValueError("背景音乐链接或曲名格式不正确（曲名最多 200 字）")
+    src = src.strip()
+    if not src:
+        return None
+    if not re.fullmatch(r"/audio/[a-f0-9]{64}\.mp3", src):
+        try:
+            parsed = urlparse(src)
+            valid = parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password and parsed.port != 0
+        except ValueError:
+            valid = False
+        if not valid or len(src) > 4096 or re.search(r"[\s\x00-\x1f\x7f]", src):
+            raise ValueError("背景音乐请使用本地导入的 MP3 或完整的 HTTPS 音频直链")
+    return {"src": src, "title": title.strip() or "背景音乐"}
+
+
+def apply_bgm(target, payload):
+    if "bgm" in payload:
+        value = validate_bgm(payload["bgm"])
+        if value:
+            target["bgm"] = value
+        else:
+            target.pop("bgm", None)
+
+
+def validate_audio_bindings(lib):
+    if not isinstance(lib.get("series", []), list):
+        raise ValueError("备份 series 格式不正确")
+    for item in lib["works"] + lib.get("series", []):
+        if not isinstance(item, dict):
+            raise ValueError("备份条目格式不正确")
+        validate_bgm(item.get("bgm"))
+
+
+def is_mp3(raw):
+    """识别 ID3 后的 MPEG 音频帧头；实际解码由浏览器完成。"""
+    if not raw or len(raw) > AUDIO_LIMIT:
+        return False
+    start = 0
+    if raw[:3] == b"ID3":
+        if len(raw) < 10 or any(n > 127 for n in raw[6:10]):
+            return False
+        start = 10 + sum(n << shift for n, shift in zip(raw[6:10], (21, 14, 7, 0)))
+    for i in range(start, min(len(raw) - 3, start + 65536)):
+        a, b, c = raw[i:i + 3]
+        if a == 255 and b & 224 == 224 and (b >> 3) & 3 != 1 and (b >> 1) & 3 == 1 and (c >> 4) not in (0, 15) and (c >> 2) & 3 != 3:
+            return True
+    return False
+
+
+def add_audio_to_zip(archive, lib, all_files=False):
+    names = set(os.listdir(AUDIO_DIR)) if all_files and os.path.isdir(AUDIO_DIR) else {
+        (item.get("bgm") or {}).get("src", "").rsplit("/", 1)[-1]
+        for item in lib.get("works", []) + lib.get("series", [])
+        if isinstance(item.get("bgm"), dict) and (item["bgm"].get("src") or "").startswith("/audio/")}
+    for name in sorted(names):
+        if re.fullmatch(r"[a-f0-9]{64}\.mp3", name):
+            path = os.path.join(AUDIO_DIR, name)
+            if os.path.isfile(path):
+                archive.write(path, "audio/" + name)
+
+
 def normalize_work(payload, existing=None):
+    # 在归一化其他字段和下载封面前验证；未提交时保留已有值。
+    if "immersiveBackgroundUrl" in payload or "immersiveBackgroundUrls" in payload:
+        apply_immersive_background({}, payload)
+    apply_bgm({}, payload)
     cat = payload.get("category") or (existing or {}).get("category") or "book"
     if cat not in CATEGORIES:
         cat = "book"
@@ -2265,6 +2399,8 @@ def normalize_work(payload, existing=None):
                            proxy=bool(payload.get("coverProxy")))
         cover = local or ""
     w["cover"] = cover or ""
+    apply_immersive_background(w, payload)
+    apply_bgm(w, payload)
     w["createdAt"] = w.get("createdAt") or now_iso()
     w["updatedAt"] = now_iso()
     w.setdefault("rating", None)
@@ -2695,7 +2831,7 @@ def _tmdb_apply_overrides(draft, overrides):
         return draft
     if not isinstance(overrides, dict):
         raise ValueError("overrides 结构不正确")
-    allowed = {"title", "originalTitle", "year", "tags", "summary", "creators"}
+    allowed = {"title", "originalTitle", "year", "tags", "summary", "creators", "immersiveBackgroundUrl", "immersiveBackgroundUrls", "bgm"}
     unknown = [k for k in overrides.keys() if k not in allowed]
     if unknown:
         raise ValueError("overrides 包含不允许的字段")
@@ -2714,6 +2850,9 @@ def _tmdb_apply_overrides(draft, overrides):
         draft["summary"] = _tmdb_text(overrides.get("summary"), 20000, "简介")
     if "creators" in overrides:
         draft["creators"] = _tmdb_creators(overrides.get("creators"))
+    if "immersiveBackgroundUrl" in overrides or "immersiveBackgroundUrls" in overrides:
+        apply_immersive_background(draft, overrides)
+    apply_bgm(draft, overrides)
     return draft
 
 
@@ -2753,6 +2892,10 @@ def import_tmdb_work(raw, target_id=None, overrides=None, rating=None, first_exp
                 merged = _tmdb_overwrite_work(existing, draft)
             else:
                 merged = _tmdb_merge_work(existing, draft)
+            # 只有用户表单明确提交才改变个人背景；资料源合并/覆盖均不能覆盖它。
+            if isinstance(overrides, dict):
+                apply_immersive_background(merged, overrides)
+                apply_bgm(merged, overrides)
             works = lib.get("works") or []
             for i, w in enumerate(works):
                 if str(w.get("id")) == str(existing.get("id")):
@@ -3141,20 +3284,22 @@ def work_view(work):
 
 # ---------------------------------------------------------------- 系列
 def normalize_series(payload, existing=None):
+    apply_immersive_background({}, payload)
+    apply_bgm({}, payload)
     s = existing or {}
     s["id"] = s.get("id") or new_id("s_")
     s["name"] = (payload.get("name") or s.get("name") or "").strip()
-    s["originalTitle"] = (payload.get("originalTitle") or s.get("originalTitle") or "").strip()
+    s["originalTitle"] = (payload.get("originalTitle", s.get("originalTitle")) or "").strip()
     kind = payload.get("kind") or s.get("kind") or "mixed"
     s["kind"] = kind if kind in SERIES_KINDS else "mixed"
-    s["summary"] = (payload.get("summary") or s.get("summary") or "").strip()
-    s["note"] = (payload.get("note") or s.get("note") or "").strip()
-    s["tags"] = [t for t in (payload.get("tags") or s.get("tags") or []) if t]
-    s["creators"] = [c for c in (payload.get("creators") or s.get("creators") or []) if c and c.get("name")]
+    s["summary"] = (payload.get("summary", s.get("summary")) or "").strip()
+    s["note"] = (payload.get("note", s.get("note")) or "").strip()
+    s["tags"] = [t for t in (payload.get("tags", s.get("tags")) or []) if t]
+    s["creators"] = [c for c in (payload.get("creators", s.get("creators")) or []) if c and c.get("name")]
     s["source"] = payload.get("source") or s.get("source") or {"name": "manual", "label": "手动"}
-    s["infobox"] = [p for p in (payload.get("infobox") or s.get("infobox") or [])
+    s["infobox"] = [p for p in (payload.get("infobox", s.get("infobox")) or [])
                     if p.get("key") and p.get("value")]
-    s["userFields"] = [p for p in (payload.get("userFields") or s.get("userFields") or [])
+    s["userFields"] = [p for p in (payload.get("userFields", s.get("userFields")) or [])
                        if p.get("key") and p.get("value")]
     cover = payload.get("cover")
     if cover is None:
@@ -3170,6 +3315,8 @@ def normalize_series(payload, existing=None):
     s.setdefault("experiences", [])
     s["createdAt"] = s.get("createdAt") or now_iso()
     s["updatedAt"] = now_iso()
+    apply_immersive_background(s, payload)
+    apply_bgm(s, payload)
     return s
 
 
@@ -3285,6 +3432,71 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             self._send(200, f.read(), ctype)
 
+    def serve_audio(self, url, head=False):
+        if not re.fullmatch(r"/audio/[a-f0-9]{64}\.mp3", url):
+            return self._send(404, "not found", "text/plain")
+        path = os.path.join(AUDIO_DIR, url.rsplit("/", 1)[-1])
+        if not os.path.isfile(path):
+            return self._send(404, "not found", "text/plain")
+        size = os.path.getsize(path)
+        start, end, code = 0, size - 1, 200
+        requested = self.headers.get("Range")
+        if requested:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+            if not match or not any(match.groups()):
+                return self._send(416, b"", extra_headers={"Content-Range": f"bytes */{size}"})
+            left, right = match.groups()
+            if left:
+                start, end = int(left), min(int(right), end) if right else end
+            else:
+                start = max(0, size - int(right))
+            if start > end or start >= size:
+                return self._send(416, b"", extra_headers={"Content-Range": f"bytes */{size}"})
+            code = 206
+        self.send_response(code)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if not head:
+            try:
+                with open(path, "rb") as audio:
+                    audio.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        chunk = audio.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    def do_HEAD(self):
+        return self.serve_audio(urlparse(self.path).path, head=True)
+
+    def handle_audio_upload(self):
+        self.close_connection = True
+        load_library()  # 主档案损坏时，资源写入同样停止。
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > AUDIO_LIMIT:
+            self.close_connection = True
+            return self.send_json({"ok": False, "error": "本地 BGM 请选择 30 MB 以内的 MP3 文件"}, 413)
+        raw = self.rfile.read(length)
+        if len(raw) != length or not is_mp3(raw):
+            return self.send_json({"ok": False, "error": "没有识别到有效的 MP3 音频，请重新选择文件"}, 400)
+        ensure_dirs()
+        name = hashlib.sha256(raw).hexdigest() + ".mp3"
+        path = os.path.join(AUDIO_DIR, name)
+        if not os.path.exists(path):
+            atomic_write_bytes(path, raw)
+        title = unquote(self.headers.get("X-Audio-Name", "背景音乐"))[:200]
+        return self.send_json({"ok": True, "bgm": {"src": "/audio/" + name, "title": title}, "bytes": length})
+
     # --- 路由
     def do_GET(self):
         u = urlparse(self.path)
@@ -3295,6 +3507,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.serve_file(os.path.join(WEB_DIR, "index.html"))
             if p.startswith("/covers/"):
                 return self.serve_file(os.path.join(COVER_DIR, os.path.basename(p)))
+            if p.startswith("/audio/"):
+                return self.serve_audio(p)
             if p.startswith("/static/"):
                 return self.serve_file(os.path.join(WEB_DIR, os.path.basename(p)))
             if p == "/api/img":
@@ -3362,6 +3576,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path
         try:
+            if p == "/api/audio":
+                return self.handle_audio_upload()
             body = self.read_body()
             if p == "/api/search":
                 return self.handle_search(body)
@@ -3423,6 +3639,8 @@ class Handler(BaseHTTPRequestHandler):
             log_event("http", "POST " + p, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
             self.send_json({"ok": False, "dataState": "corrupt",
                             "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
         except Exception as e:
             log_event("http", "POST " + p, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
@@ -3436,6 +3654,8 @@ class Handler(BaseHTTPRequestHandler):
             log_event("http", "PATCH " + u.path, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
             self.send_json({"ok": False, "dataState": "corrupt",
                             "error": f"主档案损坏，已停止写入以保护原文件：{e.reason}"}, 409)
+        except ValueError as e:
+            self.send_json({"ok": False, "error": str(e)}, 400)
         except Exception as e:
             log_event("http", "PATCH " + u.path, "fail", f"{type(e).__name__}: {e}", logging.ERROR, exc=True)
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
@@ -4002,6 +4222,7 @@ class Handler(BaseHTTPRequestHandler):
                     fp = os.path.join(DATA_DIR, cov)
                     if os.path.exists(fp):
                         z.write(fp, cov)
+            add_audio_to_zip(z, lib)
         name = f"archive_with_covers_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
         return self._send(200, buf.getvalue(), "application/zip",
                           {"Content-Disposition": f'attachment; filename="{quote(name)}"'})
@@ -4010,6 +4231,7 @@ class Handler(BaseHTTPRequestHandler):
         data = body.get("data")
         mode = body.get("mode") or "merge"
         cover_cnt = 0
+        audio_before = set(os.listdir(AUDIO_DIR)) if os.path.isdir(AUDIO_DIR) else set()
         if body.get("zip"):
             b64 = body["zip"]
             if isinstance(b64, str) and b64.startswith("data:") and "," in b64:
@@ -4033,6 +4255,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": False, "error": "备份文件格式不正确"}, 400)
         incoming = data["works"]
         incoming_series = data.get("series") or []
+        if not isinstance(incoming_series, list):
+            raise ValueError("备份 series 格式不正确")
+        for item in incoming + incoming_series:
+            if not isinstance(item, dict):
+                raise ValueError("备份条目格式不正确")
+            apply_bgm(item, item)
         with _lock:
             lib = load_library()
             if mode == "replace":
@@ -4054,7 +4282,8 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(data.get("settings"), dict):
                 lib["settings"].update({k: v for k, v in data["settings"].items() if k != "deepseek_key"})
             save_library(lib)
-        return self.send_json({"ok": True, "count": len(lib["works"]), "covers": cover_cnt})
+        audio_cnt = len(set(os.listdir(AUDIO_DIR)) - audio_before) if os.path.isdir(AUDIO_DIR) else 0
+        return self.send_json({"ok": True, "count": len(lib["works"]), "covers": cover_cnt, "audio": audio_cnt})
 
     def handle_clear_data(self, body):
         """清空个人记录（作品 / 系列 / 封面 / 项目内快照），清空前先整包备份到项目外的 娱乐档案_备份。"""
@@ -4069,6 +4298,7 @@ class Handler(BaseHTTPRequestHandler):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("library.json", json.dumps(lib, ensure_ascii=False, indent=1))
+            add_audio_to_zip(z, lib, all_files=True)
             for item in list(lib.get("works") or []) + list(lib.get("series") or []):
                 cov = item.get("cover") or ""
                 if cov.startswith("covers/"):
@@ -4078,13 +4308,18 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "wb") as f:
             f.write(buf.getvalue())
         cleared = {"works": len(lib.get("works") or []), "series": len(lib.get("series") or []),
-                   "covers": 0, "backups": 0}
+                   "covers": 0, "audio": 0, "backups": 0}
         with _lock:
             newlib = default_library()
-            for k in ("proxy", "proxy_port", "backup_keep"):
+            for k in ("proxy", "proxy_port", "backup_keep", "immersive_background_interval", "immersive_background_order"):
                 if k in lib.get("settings", {}):
                     newlib["settings"][k] = lib["settings"][k]
             write_library(newlib)
+            for fn in os.listdir(AUDIO_DIR):
+                fp = os.path.join(AUDIO_DIR, fn)
+                if os.path.isfile(fp):
+                    os.remove(fp)
+                    cleared["audio"] += 1
             for fn in os.listdir(COVER_DIR):
                 fp = os.path.join(COVER_DIR, fn)
                 if os.path.isfile(fp):
@@ -4103,6 +4338,19 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("proxy", "proxy_port", "backup_keep"):
                 if k in body:
                     lib["settings"][k] = body[k]
+            if "immersive_background_interval" in body:
+                try:
+                    interval = int(body["immersive_background_interval"])
+                except (TypeError, ValueError):
+                    raise ValueError("背景切换间隔必须是 5 到 300 秒")
+                if not 5 <= interval <= 300:
+                    raise ValueError("背景切换间隔必须是 5 到 300 秒")
+                lib["settings"]["immersive_background_interval"] = interval
+            if "immersive_background_order" in body:
+                order = body["immersive_background_order"]
+                if order not in ("ordered", "random"):
+                    raise ValueError("背景播放方式无效")
+                lib["settings"]["immersive_background_order"] = order
             save_library(lib, snapshot=False)
         _proxy_cache["at"] = 0
         return self.send_json({"ok": True, "settings": lib["settings"]})

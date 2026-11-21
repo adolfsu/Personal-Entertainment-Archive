@@ -497,7 +497,6 @@ select.mini:focus{outline:0;box-shadow:0 0 0 3px color-mix(in srgb,var(--lenso-t
 }
 .series-card:active{transform:scale(.985)}
 .series-card:focus-visible{outline:var(--lenso-focus-width) solid var(--lenso-focus-ring);outline-offset:3px}
-.wall.has-series .series-card{grid-column:span 2}
 .series-badge{
   position:absolute;top:12px;right:12px;
   height:20px;padding:0 7px;display:inline-flex;align-items:center;
@@ -1370,7 +1369,6 @@ html[data-theme="shelf"] .wall{
       transparent calc(var(--book-h) + 44px) calc(var(--book-h) + var(--shelf-gap)));
   background-repeat:repeat-y;
 }
-html[data-theme="shelf"] .wall.has-series .series-card{grid-column:span 2}
 html[data-theme="shelf"] .card{
   height:var(--book-h);
   border-radius:2px 7px 7px 2px;
@@ -1592,7 +1590,6 @@ html[data-theme="shelf"][data-mode="light"] .toast{background:rgba(255,249,236,.
   .score-badge{top:8px;right:8px;min-width:34px;height:22px;font-size:12.5px}
   .cat-mark{top:8px;left:8px;font-size:9px}
   .series-mark{left:8px;top:36px;font-size:9px}
-  .wall.has-series .series-card{grid-column:span 2}
   .series-card{padding:12px;gap:12px}
   .series-stack{width:78px}
 
@@ -1655,7 +1652,6 @@ html[data-theme="shelf"][data-mode="light"] .toast{background:rgba(255,249,236,.
         rgba(0,0,0,.48) calc(var(--book-h) + 35px) calc(var(--book-h) + 44px),
         transparent calc(var(--book-h) + 44px) calc(var(--book-h) + var(--shelf-gap)));
   }
-  html[data-theme="shelf"] .wall.has-series .series-card{grid-column:span 2}
   html[data-theme="shelf"] .series-card{height:auto;min-height:calc(var(--book-h) * .72)}
 }
 
@@ -1689,8 +1685,12 @@ html[data-theme="shelf"][data-mode="light"] .toast{background:rgba(255,249,236,.
   }
   .card:hover,.series-card:hover{transform:none}
   .card:active,.series-card:active,.btn:active{transform:none}
-  .drawer,.modal-box{transform:none!important}
+  .drawer{transform:translate(-50%,-50%)!important}
+  .modal-box{transform:none!important}
 }
+
+.sync-notice{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;padding:12px;color:var(--lenso-system-orange)}
+.sync-notice[hidden]{display:none}
 
 
 

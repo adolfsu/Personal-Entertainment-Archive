@@ -1,0 +1,50 @@
+<!doctype html><html><meta charset="utf-8"><title>阶段 1 浏览器回归</title>
+<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:90%}</style>
+<pre id="result">RUNNING</pre><iframe src="/"></iframe>
+<script>
+(async () => {
+  const result = document.querySelector('#result');
+  const frame = document.querySelector('iframe');
+  if (location.search.includes('narrow')) frame.style.width='375px';
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  try {
+    for (let i=0;i<100;i++) {
+      await new Promise(resolve=>setTimeout(resolve,50));
+      if (frame.contentDocument?.querySelector('#stats')?.textContent.includes('部作品')) break;
+    }
+    const w=frame.contentWindow, d=frame.contentDocument;
+    const run=code=>w.eval(code);
+    check(d.querySelector('#stats').textContent.includes('部作品'),'页面初始化失败');
+    const series=await run('api("/api/series",{method:"POST",body:{name:"测试系列"}})');
+    check(series.ok,'系列创建失败');
+    check(d.querySelector('[data-sid="'+series.series.id+'"]'),'空系列不可见');
+    const work=await run('api("/api/works",{method:"POST",body:{category:"book",draft:{title:"测试作品"}}})');
+    const sid=JSON.stringify(series.series.id), wid=JSON.stringify(work.work.id);
+    check(work.ok,'作品创建失败');
+    await run(`api('/api/series/'+${sid}+'/members',{method:'POST',body:{workIds:[${wid}]}})`);
+    run(`openDrawer(${wid})`);
+    d.querySelector('#ratingRange').value='9';
+    d.querySelector('#ratingRange').oninput();
+    await d.querySelector('#ratingSave').onclick();
+    check(run(`S.series.find(s=>s.id===${sid}).avgRating`)===9,'评分后系列均分未同步');
+    d.querySelector('#expDate').value='2026-11-20';
+    d.querySelector('#expStatus').value='completed';
+    await d.querySelector('#expAdd').onclick();
+    check(run(`S.series.find(s=>s.id===${sid}).completedCount`)===1,'经历后系列进度未同步');
+    // 将生产样式中真实的减少动态媒体规则应用到测试 iframe，不修改系统偏好。
+    for (const sheet of d.styleSheets) for (const rule of sheet.cssRules) {
+      if (rule.media?.mediaText.includes('prefers-reduced-motion')) rule.media.mediaText='all';
+    }
+    await new Promise(resolve=>w.requestAnimationFrame(()=>w.requestAnimationFrame(resolve)));
+    const range=d.querySelector('#drawer').getBoundingClientRect();
+    check(Math.abs(range.left+range.width/2-d.documentElement.clientWidth/2)<2,'减少动态时详情水平位置异常');
+    check(Math.abs(range.top+range.height/2-d.documentElement.clientHeight/2)<2,'减少动态时详情垂直位置异常');
+    await run(`api('/api/works/'+${wid},{method:'DELETE'})`);
+    check(run(`S.series.find(s=>s.id===${sid}).memberCount`)===0,'删除作品后系列人数未同步');
+    check(!d.querySelector('#drawer').classList.contains('show'),'删除当前作品后详情未关闭');
+    await run('doUndo()');
+    check(run(`S.series.find(s=>s.id===${sid}).memberCount`)===1,'撤销后系列人数未恢复');
+    result.textContent='PASS: empty series, rating, experience, delete, undo, reduced-motion centering';
+  } catch(e) { result.textContent='FAIL: '+e.message; }
+})();
+</script></html>

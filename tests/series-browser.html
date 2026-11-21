@@ -1,0 +1,111 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>系列沉浸验收</title>
+<style>body{margin:0;font:14px system-ui;background:#e5e5e5;color:#222}header{padding:12px;display:flex;gap:12px;align-items:center}pre{white-space:pre-wrap;margin:0}iframe{display:block;height:880px;border:0}button{padding:8px 12px}</style>
+<header><button id="run">运行验收</button><pre id="result">等待运行</pre></header><iframe src="/" style="width:1200px"></iframe>
+<script>
+const frame=document.querySelector('iframe'),result=document.querySelector('#result');
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(condition,message)=>{if(!condition)throw Error(message)};
+const waitFor=async(predicate,message,timeout=12000)=>{const end=Date.now()+timeout;while(Date.now()<end){if(predicate())return;await pause(30)}throw Error(message)};
+document.querySelector('#run').onclick=async()=>{
+  const button=document.querySelector('#run');button.disabled=true;result.textContent='验收中…';
+  try{
+    await waitFor(()=>frame.contentDocument?.querySelector('[data-series-immersive="mixed"]'),'页面未启动');
+    const w=frame.contentWindow,d=frame.contentDocument,run=code=>w.eval(code),root=()=>d.querySelector('#immersiveRoot');
+    d.querySelector('[data-series-immersive="mixed"]').click();
+    await waitFor(()=>root().dataset.view==='series'&&!root().hidden,'系列入口失败');
+    check(d.querySelectorAll('[data-im-member]').length===12,'未展示完整成员');
+    await waitFor(()=>root().dataset.background==='dedicated','系列没有大图');
+    const brightness=()=>d.querySelector('[data-im-action="brightness"]');
+    if(root().dataset.backgroundTone==='bright')brightness().click();
+    check(root().dataset.backgroundTone==='soft'&&brightness().getAttribute('aria-pressed')==='false','柔和模式状态错误');
+    const scene=d.querySelector('.im-scene'),image=d.querySelector('.im-scene img.is-visible'),shade=w.getComputedStyle(d.querySelector('.im-shade')).backgroundImage;
+    const theme=d.documentElement.dataset.theme,mode=d.documentElement.dataset.mode;
+    brightness().click();
+    check(root().dataset.backgroundTone==='bright'&&brightness().getAttribute('aria-pressed')==='true','明亮模式状态错误');
+    check(w.getComputedStyle(d.querySelector('.im-shade')).backgroundImage!==shade,'明亮模式没有调整遮罩');
+    check(d.querySelector('.im-scene')===scene&&d.querySelector('.im-scene img.is-visible')===image,'亮度切换重载背景');
+    check(d.documentElement.dataset.theme===theme&&d.documentElement.dataset.mode===mode,'背景切换改变界面主题');
+    check(run('localStorage.getItem("grdag_immersive_brightness")')==='bright','亮度偏好未保存');
+    const initial=d.querySelector('.im-scene img.is-visible').src;
+    await waitFor(()=>d.querySelector('.im-scene img.is-visible')?.src!==initial,'系列背景未轮播');
+    const shared=d.querySelector('.im-scene img.is-visible').src;
+    const card=d.querySelector('[data-im-member="work-1"]');card.dispatchEvent(new w.PointerEvent('pointerover',{bubbles:true,pointerType:'mouse'}));
+    await waitFor(()=>d.querySelector('.im-scene img.is-visible')?.src.endsWith('series-scene-2.svg'),'悬停未切换成员背景');
+    check(d.querySelectorAll('.im-scene img').length>=2,'悬停未交叠过渡');
+    const noArt=d.querySelector('[data-im-member="work-2"]');card.dispatchEvent(new w.PointerEvent('pointerout',{bubbles:true,pointerType:'mouse',relatedTarget:noArt}));noArt.dispatchEvent(new w.PointerEvent('pointerover',{bubbles:true,pointerType:'mouse'}));
+    await waitFor(()=>d.querySelector('.im-scene img.is-visible')?.src===shared,'无图成员未恢复公共背景位置');
+    const scroller=d.querySelector('.im-scroll');scroller.scrollTop=250;const saved=scroller.scrollTop;
+    d.querySelector('[data-im-member="work-1"]').click();
+    await waitFor(()=>root().dataset.view==='work','成员入口失败');
+    check(d.querySelector('.im-return').textContent.includes('返回系列'),'没有返回系列入口');
+    check(d.querySelector('#immersiveTitle').textContent.includes('游戏'),'进入错误成员');
+    check(root().dataset.backgroundTone==='bright'&&brightness().getAttribute('aria-pressed')==='true','成员没有沿用亮度偏好');
+    const memberScene=d.querySelector('.im-scene'),memberShade=w.getComputedStyle(d.querySelector('.im-shade')).backgroundImage;
+    brightness().click();check(root().dataset.backgroundTone==='soft'&&w.getComputedStyle(d.querySelector('.im-shade')).backgroundImage!==memberShade,'成员亮度未切换');
+    brightness().click();check(d.querySelector('.im-scene')===memberScene,'成员亮度切换重建页面');
+    d.querySelector('[data-im-action="next"]').click();check(d.querySelector('#immersiveTitle').textContent.includes('漫画'),'成员顺序不一致');
+    d.querySelector('[data-im-action="close"]').click();
+    await waitFor(()=>root().dataset.view==='series','返回系列失败');
+    check(Math.abs(d.querySelector('.im-scroll').scrollTop-saved)<=1,`返回系列丢失滚动位置：${saved} → ${d.querySelector('.im-scroll').scrollTop}`);
+    d.querySelector('[data-im-member="work-0"]').click();w.history.back();await waitFor(()=>root().dataset.view==='series','浏览器后退未返回系列');
+    w.history.forward();await waitFor(()=>root().dataset.view==='work','浏览器前进未恢复成员');
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().dataset.view==='series','前进后返回系列失败');
+    d.querySelector('[data-im-category="book"]').click();check(d.querySelectorAll('[data-im-member]').length===2,'分类筛选错误');
+    const search=d.querySelector('[data-im-series-search]');search.value='没有这个标题';search.dispatchEvent(new w.Event('input',{bubbles:true}));
+    check(d.querySelectorAll('[data-im-member]').length===0&&!d.querySelector('.ims-empty').hidden,'搜索空态错误');
+    search.value='';search.dispatchEvent(new w.Event('input',{bubbles:true}));d.querySelector('[data-im-category="all"]').click();
+    d.querySelector('[data-im-action="details"]').click();
+    await waitFor(()=>d.querySelector('#drawer').classList.contains('show'),'系列详情未打开');
+    check(!!d.querySelector('#sBackgrounds'),'缺少系列背景编辑字段');
+    const seriesImage=w.location.origin+'/static/series-scene-2.svg';d.querySelector('#sBackgrounds').value=seriesImage;d.querySelector('#sSave').click();
+    await waitFor(()=>run('seriesById("mixed").immersiveBackgroundUrls?.[0]')===seriesImage,'系列背景表单未保存');
+    d.querySelector('#seriesEnterExhibit').click();await waitFor(()=>!root().hidden,'系列详情返回失败');
+    for(const width of [320,375,768,1200]){
+      frame.style.width=width+'px';await pause(80);
+      for(const surface of ['overlay','fullscreen']){
+        d.querySelector(`[data-im-action="${surface}"]`).click();await pause(30);
+        for(const tone of ['soft','bright']){
+        if(root().dataset.backgroundTone!==tone)brightness().click();
+        const box=d.querySelector('.im-window').getBoundingClientRect();
+        for(const node of d.querySelectorAll('.im-toolbar button,.ims-member')){const r=node.getBoundingClientRect();check(r.left>=box.left-1&&r.right<=box.right+1,`${width}/${surface} 元素横向越界`)}
+        check(d.querySelector('.im-scroll').scrollWidth<=d.querySelector('.im-scroll').clientWidth+1,`${width}/${surface} 横向溢出`);
+        }
+      }
+    }
+    frame.style.width='1200px';
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().hidden,'系列退出失败');
+    run('S.filters.q="动画";renderWall();openSeriesImmersive("mixed","fullscreen")');
+    await waitFor(()=>!root().hidden&&root().dataset.view==='series','筛选后系列入口失败');
+    check(d.querySelectorAll('[data-im-member]').length===12&&d.querySelector('.ims-caption').textContent.includes('1 / 12'),'首页筛选误截断系列');
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().hidden,'退出失败');
+    run('S.filters.q="";renderWall();openSeriesImmersive("books","fullscreen")');
+    await waitFor(()=>root().dataset.background==='ambient','无图书籍系列未使用柔和背景');
+    check(d.querySelectorAll('[data-im-member]').length===3,'图书成员丢失');
+    check([...d.querySelectorAll('.ims-member-cover img')].every(img=>w.getComputedStyle(img).objectFit==='contain'),'书籍封面被裁切');
+    check(w.getComputedStyle(d.querySelector('.im-scene img')).filter.includes('90px'),'封面未柔化');
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().hidden,'退出图书系列失败');
+    run('openSeriesImmersive("broken","fullscreen")');await waitFor(()=>root().dataset.background==='ambient','坏背景/代表图未回退成员封面');
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().hidden,'退出坏图系列失败');
+    run('openSeriesImmersive("empty","fullscreen")');check(!d.querySelector('.ims-empty').hidden,'空系列没有提示');
+    d.querySelector('[data-im-action="details"]').click();check(!!d.querySelector('#memberAdd'),'空系列无法管理成员');
+    d.querySelector('#drawerClose').click();await waitFor(()=>!root().hidden,'详情返回空系列失败');
+    d.querySelector('[data-im-action="close"]').click();await waitFor(()=>root().hidden,'空系列退出失败');
+    run('openSeriesImmersive("mixed","fullscreen")');
+    const previousDocument=d;w.location.reload();
+    await waitFor(()=>frame.contentDocument!==previousDocument&&frame.contentDocument.querySelector('[data-series-immersive="mixed"]'),'刷新未完成');
+    const refreshed=frame.contentDocument;refreshed.querySelector('[data-series-immersive="mixed"]').click();
+    await waitFor(()=>refreshed.querySelector('#immersiveRoot').dataset.backgroundTone==='bright','刷新后亮度偏好丢失');
+    check(refreshed.querySelector('[data-im-action="brightness"]').getAttribute('aria-pressed')==='true','刷新后按钮状态错误');
+    frame.style.width='375px';await pause(80);
+    await waitFor(()=>refreshed.querySelector('#immersiveRoot').dataset.background==='dedicated','刷新后背景未加载');
+    const intro=refreshed.querySelector('.ims-intro'),mobileScroll=refreshed.querySelector('.im-scroll'),mobileHeight=intro.getBoundingClientRect().height;
+    mobileScroll.scrollTop=180;const mobilePosition=mobileScroll.scrollTop;
+    refreshed.querySelector('[data-im-action="brightness"]').click();
+    check(Math.abs(intro.getBoundingClientRect().height-mobileHeight)<1&&Math.abs(mobileScroll.scrollTop-mobilePosition)<1,'手机亮度切换导致布局或位置跳变');
+    refreshed.querySelector('[data-im-action="brightness"]').click();
+    check(w.getComputedStyle(intro,'::before').backgroundColor!=='rgba(0, 0, 0, 0)','手机明亮模式没有局部阅读衬底');
+    result.textContent='PASS：16 组布局、背景柔和/明亮切换、跨视图共享及刷新记忆、切换不重载背景、不改变主题、全系列轮播、悬停切图、无图回退、成员导航、分类搜索、系列背景保存、详情往返';
+  }catch(error){result.textContent='FAIL：'+error.message}
+  finally{button.disabled=false}
+};
+</script></html>

@@ -42,8 +42,9 @@ const S = {
   drawerRating: 8, seriesRating: 8,
   add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, youshuRaw: "", youshuPreview: null, youshuApplied: null },
   seriesDraft: { mode: "create", attachTo: null },
-  backups: [], undoAvailable: false, dataState: "normal",
+  backups: [], undoAvailable: false, dataState: "normal", syncPending: false,
 };
+let immersiveView = null;
 
 /* ------------------------------------------------------------ 外观（明暗 / 主题） */
 const APPEARANCE = {
@@ -105,17 +106,18 @@ function setTheme(theme) {
 function applyWallDensity() {
   const wall = el("#wall");
   if (!wall) return;
-  if (APPEARANCE.theme !== "stage" || APPEARANCE.size === "small") {
-    wall.style.gridTemplateColumns = "";
-    return;
-  }
+  // 测量前临时取消跨列，避免旧的双列系列在单列布局中制造隐式列。
+  wall.style.setProperty("--exhibit-series-span", "1");
   wall.style.gridTemplateColumns = "";
-  const raw = getComputedStyle(wall).gridTemplateColumns;
-  let base = (raw && raw !== "none") ? raw.trim().split(/\s+/).filter(Boolean).length : 0;
-  if (!base) base = Math.max(1, Math.floor((wall.clientWidth + 18) / (148 + 18)));
-  const factor = APPEARANCE.size === "medium" ? 0.75 : 0.5;
-  const cols = Math.max(1, Math.round(base * factor));
-  wall.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  if (APPEARANCE.theme === "stage" && APPEARANCE.size !== "small") {
+    const raw = getComputedStyle(wall).gridTemplateColumns;
+    const base = raw && raw !== "none" ? raw.trim().split(/\s+/).length : 1;
+    const factor = APPEARANCE.size === "medium" ? 0.75 : 0.5;
+    wall.style.gridTemplateColumns = `repeat(${Math.max(1, Math.round(base * factor))}, minmax(0, 1fr))`;
+  }
+  const columns = getComputedStyle(wall).gridTemplateColumns.trim().split(/\s+/).filter(value => /px$/.test(value));
+  wall.style.setProperty("--exhibit-series-span", columns.length > 1 ? "2" : "1");
+  if (columns.length) wall.style.setProperty("--exhibit-column-width", columns[0]);
 }
 
 function setSize(size) {
@@ -174,18 +176,50 @@ function externalSearchLinksHTML(platforms, keyword) {
   return platforms.map(p => `<a class="source-tab external-search-link" href="${esc(externalSearchUrl(p, keyword))}" target="_blank" rel="noopener noreferrer" aria-label="在 ${esc(p.label)} 搜索 ${esc(keyword)}">${ICONS.search}<span>${esc(p.label)}</span></a>`).join("");
 }
 
-const UNDOABLE_PATH = /^\/api\/(works|series|import|import-records)(\/|$)/;
+const UNDOABLE_PATH = /^\/api\/(works|series|import|import-records|tmdb\/import)(\/|$)/;
+const dataQueue = ArchiveV2.core.createQueue();
 
 async function api(path, opts = {}) {
+  const method = (opts.method || "GET").toUpperCase();
+  const request = async () => {
+    const out = await requestApi(path, opts);
+    syncUndoState(path, method, out);
+    if (out.ok === true && ArchiveV2.core.isMutation(path, method)) {
+     // 写入结果和完整快照在同一队列内处理，避免较旧的快照覆盖后一次修改。
+     if (out.work) applyWork(out.work);
+     if (out.series) replaceSeries(out.series);
+     const deletedWork = method === "DELETE" && path.match(/^\/api\/works\/([^/]+)$/);
+     if (deletedWork) S.works = S.works.filter(w => w.id !== deletedWork[1]);
+     const deletedSeries = method === "DELETE" && path.match(/^\/api\/series\/([^/]+)$/);
+     if (deletedSeries) {
+       S.series = S.series.filter(s => s.id !== deletedSeries[1]);
+       if (Array.isArray(out.works)) S.works = out.works;
+     }
+     if (path === "/api/clear-data" || path === "/api/recover/new-start") { S.works = []; S.series = []; }
+     await refreshSnapshot(true);
+    }
+    return out;
+  };
+  return ArchiveV2.core.isMutation(path, method) ? dataQueue(request) : request();
+}
+
+async function requestApi(path, opts = {}) {
   const o = { headers: { "Content-Type": "application/json" } };
   if (opts.method) o.method = opts.method;
   if (opts.body) o.body = JSON.stringify(opts.body);
+  const controller = path === "/api/bootstrap" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15000) : null;
+  if (controller) o.signal = controller.signal;
+  try {
   const res = await fetch(path, o);
-  const text = await res.text();
-  let out;
-  try { out = JSON.parse(text); } catch (e) { return { ok: false, error: "响应解析失败" }; }
-  syncUndoState(path, (o.method || "GET").toUpperCase(), out);
+    const out = await res.json();
+    if (!res.ok) return { ...out, ok: false, error: out.error || "本地服务请求失败" };
   return out;
+  } catch (e) {
+    return { ok: false, error: "请求未完成，请刷新确认数据状态后再试" };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /* 任何成功的写操作都会生成写前快照，撤销按钮必须立刻可用；
@@ -295,7 +329,7 @@ async function doUndo() {
   const r = await api("/api/undo", { method: "POST", body: {} });
   if (!r.ok) return toast(r.error || "撤销失败", true);
   toast(`已撤销上一步，当前 ${r.works} 部作品`);
-  await reloadAll();
+
 }
 
 /* 恢复备份的完整流程：预览数量差异和风险 → 用户确认 → 恢复 */
@@ -313,16 +347,35 @@ async function restoreBackup(kind, name) {
   return true;
 }
 
-async function reloadAll() {
-  const b = await api("/api/bootstrap");
-  if (!b || !Array.isArray(b.works)) return;
+function reloadAll() {
+  return dataQueue(() => refreshSnapshot(false));
+}
+
+async function refreshSnapshot(afterMutation) {
+  const b = await requestApi("/api/bootstrap");
+  if (!ArchiveV2.core.validSnapshot(b)) {
+    if (afterMutation || S.syncPending) {
+     S.syncPending = true;
+     el("#syncNotice").hidden = false;
+    } else toast(b.error || "刷新失败", true);
+    return false;
+  }
   S.works = b.works;
-  S.series = b.series || [];
+  S.series = b.series;
+  S.settings = b.settings || S.settings;
   S.undoAvailable = Boolean(b.undoAvailable);
   S.dataState = b.dataState || "normal";
   S.backups = b.backups || [];
+  S.syncPending = false;
+  el("#syncNotice").hidden = true;
+  if (S.currentId && !findWork(S.currentId)) closeDrawer();
+  if (S.currentSeriesId && !seriesById(S.currentSeriesId)) closeDrawer();
   updateUndoBtn();
+  if (S.dataState === "corrupt") { showCorrupt(b); return false; }
   renderTabs(); renderStatusChips(); renderWall(); renderStats();
+  if (S.currentId || S.currentSeriesId) renderDrawer();
+  if (immersiveView) immersiveView.refresh();
+  return true;
 }
 
 function catLabel(key) {
@@ -407,92 +460,74 @@ function visibleWorks() {
 function seriesById(id) { return S.series.find(s => s.id === id) || null; }
 function seriesNameOf(w) { const s = w.primarySeriesId ? seriesById(w.primarySeriesId) : null; return s ? s.name : ""; }
 
-function cardHTML(w) {
-  const cover = w.coverUrl
-    ? `<img src="${esc(w.coverUrl)}" alt="" loading="lazy" onerror="this.parentNode.classList.remove('has-cover')">`
-    : "";
-  const sName = seriesNameOf(w);
-  return `<article class="card" data-id="${w.id}" data-cat="${w.category}" tabindex="0" role="button" aria-label="查看《${esc(w.title)}》">
-    <div class="card-cover${w.coverUrl ? " has-cover" : ""}">
-      <div class="cover-fallback"><span>${esc(catLabel(w.category))}</span></div>
-      ${cover}
-      <div class="card-veil"></div>
-      <div class="cat-mark">${esc(catLabel(w.category))}</div>
-      ${sName ? `<div class="series-mark">${esc(sName)}</div>` : ""}
-      <div class="score-badge ${w.rating == null ? "none" : ""}">${w.rating == null ? "未评" : fmtScore(w.rating)}</div>
-      <div class="card-meta">
-        <div class="card-title">${esc(w.title)}</div>
-        <div class="card-sub"><span class="pill" data-status="${w.status}">${esc(statusLabel(w))}</span>${w.year ? `<span>${esc(w.year)}</span>` : ""}</div>
-      </div>
-    </div>
-  </article>`;
-}
-
-function seriesCardHTML(s, list) {
-  const vis = s.members.filter(m => list.some(w => w.id === m.id));
-  const stack = s.members.slice().reverse().slice(0, 3);
-  const covers = stack.map((m, i) => `<div class="ss-cover" style="--i:${i}">
-      ${m.coverUrl
-        ? `<img src="${esc(m.coverUrl)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-        : `<div class="ss-fallback">${esc(catLabel(m.category))}</div>`}
-    </div>`).join("");
-  const mix = s.catMix.map(c => `${c.label} ${c.count}`).join(" · ");
-  const countBadge = s.memberCount ? `<div class="ss-count">${s.memberCount}</div>` : "";
-  return `<article class="series-card" data-sid="${s.id}" tabindex="0" role="button" aria-label="查看系列「${esc(s.name)}」">
-    <span class="series-badge">系列</span>
-    ${stack.length ? `<div class="series-stack">${covers}${countBadge}</div>`
-      : `<div class="series-stack empty"><span class="ss-add">＋</span></div>`}
-    <div class="series-info">
-      <div class="series-name">${esc(s.name)}</div>
-      <div class="series-sub"><span class="pill" data-status="${s.baseStatus}">${esc(s.baseStatusLabel)}</span>${s.yearRange ? `<span>${esc(s.yearRange)}</span>` : ""}</div>
-      <div class="series-mix">${stack.length
-        ? esc(`${mix}${s.avgRating != null ? ` · 均分 ${fmtScore(s.avgRating)}` : ""} · 已完成 ${s.progress}`)
-        : "还没有成员，点进来添加"}</div>
-    </div>
-  </article>`;
-}
-
 function renderWall() {
+  const wall = el("#wall");
   const list = visibleWorks();
-  if (!list.length) {
-    el("#wall").innerHTML = `<div class="empty">${ICONS.archive}<div>${S.works.length ? "当前筛选下没有作品" : "档案还是空的。点右上角「添加作品」，从 Bangumi / 豆瓣 / 微信读书 / Steam 拉取信息，或粘贴链接自动填写。"}</div></div>`;
-    el("#wall").className = "wall";
-    return;
-  }
-  if (S.filters.group === "series" && S.series.length) {
-    const seen = new Set();
-    const parts = [];
-    list.forEach(w => {
-      const sid = w.primarySeriesId;
-      const s = sid ? seriesById(sid) : null;
-      if (s) {
-        if (seen.has(sid)) return;
-        seen.add(sid);
-        parts.push(seriesCardHTML(s, list));
-      } else {
-        parts.push(cardHTML(w));
-      }
-    });
-    const defaultView = S.filters.cat === "all" && S.filters.status === "all" && !S.filters.q.trim();
-    if (defaultView) {
-      S.series.forEach(s2 => {
-        if (s2.memberCount === 0 && !seen.has(s2.id)) parts.push(seriesCardHTML(s2, list));
-      });
-    }
-    el("#wall").innerHTML = parts.join("");
-    el("#wall").className = "wall has-series";
+  const items = ArchiveV2.core.exhibitionItems(list, S.series, S.filters);
+  wall.className = "wall exhibit-grid" + (items.some(item => item.type === "series") ? " has-series" : "");
+  if (!items.length) {
+    wall.innerHTML = `<div class="empty">${ICONS.archive}<div>${S.works.length ? "当前筛选下没有作品" : "档案还是空的。点右上角「添加作品」，从 Bangumi / 豆瓣 / 微信读书 / Steam 拉取信息，或粘贴链接自动填写。"}</div></div>`;
   } else {
-    el("#wall").innerHTML = list.map(cardHTML).join("");
-    el("#wall").className = "wall";
+    wall.innerHTML = items.map(item => item.type === "series"
+      ? ArchiveV2.cards.seriesCard(item.entity, item)
+      : ArchiveV2.cards.workCard(item.entity, {
+        category: catLabel(item.entity.category), status: statusLabel(item.entity), series: seriesNameOf(item.entity),
+      })).join("");
   }
-  elAll("#wall .card").forEach(c => {
-    c.onclick = () => openDrawer(c.dataset.id);
-    c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(c.dataset.id); } };
-  });
-  elAll("#wall .series-card").forEach(c => {
-    c.onclick = () => openSeries(c.dataset.sid);
-    c.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSeries(c.dataset.sid); } };
-  });
+  ArchiveV2.cards.bindWall(wall, { openWork: openDrawer, openSeries, openImmersive, openSeriesImmersive });
+  el("#enterExhibit").disabled = !list.length;
+  applyWallDensity();
+}
+
+function openImmersive(id = null, surface = "overlay") {
+  const list = visibleWorks();
+  const currentId = id || list[0]?.id;
+  if (!currentId || !list.some(work => work.id === currentId)) return toast("当前筛选下没有可浏览的作品");
+  ensureImmersive();
+  const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+  immersiveView.open(list.map(work => work.id), currentId, surface, filtered ? "当前筛选结果" : "全部作品");
+}
+
+function openSeriesImmersive(id, surface = "overlay") {
+  if (!seriesById(id)) return;
+  if (immersiveView?.isDetail()) { immersiveView.returnFromDetails(); return; }
+  if (el("#drawer").classList.contains("show")) closeDrawer({skipImmersive:true});
+  ensureImmersive();
+  const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+  immersiveView.openSeries(id, surface, filtered ? visibleWorks().map(work => work.id) : null);
+}
+
+function ensureImmersive() {
+  if (!immersiveView) {
+    immersiveView = ArchiveV2.immersive.create({
+      root: el("#immersiveRoot"), getWork: findWork, getWorks: () => S.works,
+      getSeries: seriesById, openSeriesDetails: openSeries,
+      getBackgroundSettings: () => S.settings || {},
+      notify: toast,
+      getLabels: work => ({ category: catLabel(work.category), status: statusLabel(work), series: seriesNameOf(work),
+        recordStatus: status => ((S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS)[status] || status }),
+      openDetails: openDrawer, closeDetails: () => closeDrawer({ skipImmersive: true }),
+      mainRoots: () => elAll("body > .topbar, body > .filters, body > .stats, body > .wall-tools, body > .wall-wrap, body > .sync-notice, body > .skip-link"),
+      captureOrigin: workId => {
+        const active = document.activeElement;
+        const cards = elAll("#wall .card, #wall .series-card");
+        const work = findWork(workId);
+        const anchor = active.closest(".card, .series-card") || cards.find(card => card.dataset.id === workId || card.dataset.sid === workId || card.dataset.sid === work?.primarySeriesId);
+        return { scrollY: window.scrollY, focusId: active.id,
+          workId: anchor?.dataset.id, seriesId: anchor?.dataset.sid, offset: anchor?.getBoundingClientRect().top };
+      },
+      restoreOrigin: saved => requestAnimationFrame(() => {
+        if (!saved) return;
+        const cards = elAll("#wall .card, #wall .series-card");
+        const anchor = cards.find(card => saved.workId ? card.dataset.id === saved.workId : saved.seriesId && card.dataset.sid === saved.seriesId);
+        if (anchor && saved.offset != null) window.scrollTo(0, window.scrollY + anchor.getBoundingClientRect().top - saved.offset);
+        else window.scrollTo(0, saved.scrollY);
+        const target = (saved.focusId && document.getElementById(saved.focusId)) ||
+          anchor || el("#enterExhibit");
+        target?.focus({ preventScroll: true });
+      }),
+    });
+  }
 }
 
 function renderStats() {
@@ -555,8 +590,10 @@ function openSeries(sid, keepFocus = false) {
   if (!wasOpen) focusAfterRender("#drawerClose");
 }
 
-function closeDrawer() {
+function closeDrawer(options = {}) {
   if (!el("#drawer").classList.contains("show")) return;
+  if (!options.skipImmersive && immersiveView?.isDetail()) { immersiveView.returnFromDetails(); return; }
+  ArchiveV2.bgmEditor.stop(el('#drawer'));
   restoreOverlayFocus();
   setDrawerState(false);
   S.currentId = null;
@@ -584,6 +621,7 @@ function sparkline(history) {
 }
 
 function renderDrawer() {
+  ArchiveV2.bgmEditor.stop(el('#drawer'));
   if (S.currentSeriesId) return renderSeriesDrawer();
   const w = findWork(S.currentId);
   if (!w) return;
@@ -728,33 +766,33 @@ function renderDrawer() {
   el("#ratingSave").onclick = async () => {
     const r = await api(`/api/works/${w.id}/rating`, { method: "POST", body: { score: S.drawerRating, reason: el("#ratingReason").value } });
     if (!r.ok) return toast(r.error || "保存失败", true);
-    applyWork(r.work); toast("评分已记录");
+    toast("评分已记录");
     S.drawerRating = r.work.rating; renderDrawer(); renderWall(); renderStats();
   };
   el("#expAdd").onclick = async () => {
     const body = { date: el("#expDate").value, status: el("#expStatus").value, content: el("#expText").value };
     const r = await api(`/api/works/${w.id}/experience`, { method: "POST", body });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    applyWork(r.work); toast("经历已添加"); renderDrawer(); renderWall(); renderStats();
+    toast("经历已添加"); renderDrawer(); renderWall(); renderStats();
   };
   elAll(".tl-del", body).forEach(b => b.onclick = async (ev) => {
     ev.stopPropagation();
     const r = await api(`/api/works/${w.id}/experience/${b.dataset.del}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "删除失败", true);
-    applyWork(r.work); renderDrawer(); renderWall();
+    renderDrawer(); renderWall();
   });
   elAll("[data-open-series]", body).forEach(b => b.onclick = () => openSeries(b.dataset.openSeries));
   elAll("[data-unlink]", body).forEach(b => b.onclick = async () => {
     const r = await api(`/api/series/${b.dataset.unlink}/members/${w.id}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "移出失败", true);
-    await reloadAll(); renderDrawer(); toast("已移出系列");
+    renderDrawer(); toast("已移出系列");
   });
   el("#linkSeriesAdd").onclick = async () => {
     const sid = el("#linkSeries").value;
     if (!sid) return toast("还没有可加入的系列，先点「新建系列」", true);
     const r = await api(`/api/series/${sid}/members`, { method: "POST", body: { workIds: [w.id], role: el("#linkRole").value } });
     if (!r.ok) return toast(r.error || "加入失败", true);
-    await reloadAll(); renderDrawer(); toast("已加入系列");
+    renderDrawer(); toast("已加入系列");
   };
   el("#newSeriesForWork").onclick = () => openSeriesModal({ attachTo: w.id });
   const ex = el("#expandInfo");  if (ex) ex.onclick = () => { const m = el("#infoboxMore"); const open = m.style.display !== "none"; m.style.display = open ? "none" : "block"; ex.textContent = open ? `展开全部 ${infobox.length} 项` : "收起"; };
@@ -764,14 +802,13 @@ function renderDrawer() {
     const fields = (w.userFields || []).concat([{ key: k, value: v }]);
     const r = await api(`/api/works/${w.id}`, { method: "PATCH", body: { userFields: fields } });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    applyWork(r.work); renderDrawer(); toast("字段已添加");
+    renderDrawer(); toast("字段已添加");
   };
   el("#editWork").onclick = () => openEdit(w);
   el("#deleteWork").onclick = async () => {
     if (!confirm(`确定删除《${w.title}》？该作品的评分与经历记录会一起删除。`)) return;
     const r = await api(`/api/works/${w.id}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "删除失败", true);
-    S.works = S.works.filter(x => x.id !== w.id);
     closeDrawer(); renderWall(); renderTabs(); renderStats(); toast("已删除");
   };
 }
@@ -795,6 +832,7 @@ function renderSeriesDrawer() {
       <div class="drawer-tags">
         <span class="pill" data-status="${s.baseStatus}">${esc(s.baseStatusLabel)}</span>
         ${(s.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
+        <button type="button" class="btn btn-sm" id="seriesEnterExhibit">沉浸浏览 ↗</button>
       </div>
     </div>
     <button class="icon-btn drawer-close" id="drawerClose" title="关闭" aria-label="关闭详情">${ICONS.close}</button>`;
@@ -896,6 +934,8 @@ function renderSeriesDrawer() {
       <div class="form-item"><label>系列类型</label><select id="sKind">${Object.entries(S.seriesKinds).map(([k, v]) => `<option value="${k}" ${s.kind === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
       <div class="form-item"><label>标签（逗号分隔）</label><input id="sTags" value="${esc((s.tags || []).join("，"))}"></div>
       <div class="form-item full"><label>代表图 URL（可留空，自动用成员封面）</label><input id="sCover" value="" placeholder="粘贴主视觉 / Logo 图片 URL"></div>
+      <div class="form-item full"><label for="sBackgrounds">系列沉浸背景链接（可选，每行一张，最多 20 张）</label><textarea id="sBackgrounds" rows="3" placeholder="https://… 横向系列大图">${esc((s.immersiveBackgroundUrls || (s.immersiveBackgroundUrl ? [s.immersiveBackgroundUrl] : [])).join("\n"))}</textarea><div class="tip">与全系列成员手动添加的大图共同轮播。留空也可使用成员背景；无大图时使用柔和背景和完整封面。</div></div>
+      ${ArchiveV2.bgmEditor.form(s, 'seriesBgm')}
       <div class="form-item full"><label>系列简介</label><textarea id="sSummary" style="min-height:90px">${esc(s.summary || "")}</textarea></div>
       <div class="form-item full"><label>备注</label><input id="sNote" value="${esc(s.note || "")}"></div>
     </div>
@@ -905,15 +945,18 @@ function renderSeriesDrawer() {
     </div>
   </section>`);
 
+  ArchiveV2.bgmEditor.stop(body);
   body.innerHTML = html.join("");
+  ArchiveV2.bgmEditor.bind(body, 'seriesBgm', toast);
 
   el("#drawerClose").onclick = closeDrawer;
+  el("#seriesEnterExhibit").onclick = () => openSeriesImmersive(s.id);
   const rng = el("#sRatingRange");
   rng.oninput = () => { S.seriesRating = parseFloat(rng.value); el("#sRatingNum").textContent = fmtScore(S.seriesRating); };
   el("#sRatingSave").onclick = async () => {
     const r = await api(`/api/series/${s.id}/rating`, { method: "POST", body: { score: S.seriesRating, reason: el("#sRatingReason").value } });
     if (!r.ok) return toast(r.error || "保存失败", true);
-    replaceSeries(r.series); S.seriesRating = r.series.rating;
+    S.seriesRating = r.series.rating;
     renderDrawer(); renderWall(); toast("评分已记录");
   };
   elAll(".member-row", body).forEach(row => {
@@ -929,45 +972,49 @@ function renderSeriesDrawer() {
     ev.stopPropagation();
     const r = await api(`/api/series/${s.id}/members/${b.dataset.msdel}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "移出失败", true);
-    await reloadAll(); renderDrawer(); toast("已移出");
+    renderDrawer(); toast("已移出");
   });
   el("#memberAdd").onclick = async () => {
     const wid = el("#memberPick").value;
     if (!wid) return toast("没有可添加的作品", true);
     const r = await api(`/api/series/${s.id}/members`, { method: "POST", body: { workIds: [wid], role: el("#memberRole").value } });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    await reloadAll(); renderDrawer(); toast("成员已添加");
+    renderDrawer(); toast("成员已添加");
   };
   el("#sExpAdd").onclick = async () => {
     const body2 = { date: el("#sExpDate").value, status: el("#sExpStatus").value, content: el("#sExpText").value };
     const r = await api(`/api/series/${s.id}/experience`, { method: "POST", body: body2 });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    await reloadAll(); renderDrawer(); toast("经历已添加");
+    renderDrawer(); toast("经历已添加");
   };
   elAll("[data-sdel]", body).forEach(b => b.onclick = async () => {
     const r = await api(`/api/series/${s.id}/experience/${b.dataset.sdel}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "删除失败", true);
-    await reloadAll(); renderDrawer();
+    renderDrawer();
   });
   el("#sSave").onclick = async () => {
+    let bgm;
+    try { bgm = await ArchiveV2.bgmEditor.read(body, 'seriesBgm'); } catch (error) { return toast(error.message, true); }
     const payload = {
       name: el("#sName").value.trim(), originalTitle: el("#sOrig").value.trim(),
       kind: el("#sKind").value, summary: el("#sSummary").value.trim(),
       tags: el("#sTags").value.split(/[，,]/).map(x => x.trim()).filter(Boolean),
       note: el("#sNote").value.trim(),
+      bgm,
+      immersiveBackgroundUrls: el("#sBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
     };
     const cov = el("#sCover").value.trim();
     if (cov) payload.cover = cov;
     if (!payload.name) return toast("系列名称不能为空", true);
     const r = await api(`/api/series/${s.id}`, { method: "PATCH", body: payload });
     if (!r.ok) return toast(r.error || "保存失败", true);
-    replaceSeries(r.series); await reloadAll(); renderDrawer(); toast("已保存");
+     renderDrawer(); toast("已保存");
   };
   el("#sDelete").onclick = async () => {
     if (!confirm(`删除系列《${s.name}》？成员作品不会被删，只会解除归属。`)) return;
     const r = await api(`/api/series/${s.id}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "删除失败", true);
-    await reloadAll(); closeDrawer(); toast("系列已删除");
+    closeDrawer(); toast("系列已删除");
   };
 }
 
@@ -992,6 +1039,7 @@ function activeOverlayRoot() {
     if (modalIsOpen(sel)) return el(`${sel} .modal-box`);
   }
   if (el("#drawer") && el("#drawer").classList.contains("show")) return el("#drawer");
+  if (immersiveView) return immersiveView.overlayRoot();
   return null;
 }
 
@@ -1031,7 +1079,7 @@ async function saveSeriesDraft() {
     await api(`/api/series/${r.series.id}/members`, { method: "POST", body: { workIds: [attach], role: "main" } });
   }
   setModalState("#seriesModal", false);
-  await reloadAll();
+
   openSeries(r.series.id, true);
   toast("系列已创建");
 }
@@ -1537,7 +1585,7 @@ async function importTmdbToCurrent(mode) {
   });
   if (btn) { btn.disabled = false; btn.textContent = originalText; }
   if (!r.ok) return toast(r.error || "导入失败", true);
-  applyWork(r.work);
+
   a.tmdbRaw = "";
   a.tmdbPreview = null;
   a.draft = JSON.parse(JSON.stringify(r.work));
@@ -1549,6 +1597,8 @@ async function importTmdbToCurrent(mode) {
 }
 
 async function saveTmdbCreate() {
+  let bgm;
+  try { bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
   const a = S.add;
   const btn = el("#saveWork");
   const title = el("#fTitle").value.trim();
@@ -1567,6 +1617,8 @@ async function saveTmdbCreate() {
       year: el("#fYear").value.trim(),
       tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
       summary: el("#fSummary").value.trim(),
+      immersiveBackgroundUrls: el("#fImmersiveBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+      bgm,
       creators,
     },
   };
@@ -1581,7 +1633,7 @@ async function saveTmdbCreate() {
   const r = await api("/api/tmdb/import", { method: "POST", body });
   if (btn) { btn.disabled = false; btn.textContent = "保存入库"; }
   if (!r.ok) return toast(r.error || "保存失败", true);
-  applyWork(r.work);
+
   closeAdd(); renderTabs(); renderWall(); renderStats();
   toast(r.action === "updated"
     ? (a.tmdbMode === "overwrite" ? "已覆盖已有 TMDB 作品，评分、经历、系列和用户字段已保留" : "已更新相同 TMDB 条目，已有非空资料未覆盖")
@@ -1599,6 +1651,7 @@ function openAdd() {
 }
 function closeAdd() {
   if (!modalIsOpen("#addModal")) return;
+  ArchiveV2.bgmEditor.stop(el('#addBody'));
   restoreOverlayFocus();
   setModalState("#addModal", false);
 }
@@ -1744,6 +1797,7 @@ async function importJsonInput(raw, opts = {}) {
 }
 
 function renderForm() {
+  ArchiveV2.bgmEditor.stop(el('#addBody'));
   const a = S.add;
   const d = a.draft || {};
   const body = el("#addBody");
@@ -1774,6 +1828,8 @@ function renderForm() {
       <div class="form-item"><label>年份</label><input id="fYear" value="${esc(d.year || "")}"></div>
       <div class="form-item"><label>标签（逗号分隔）</label><input id="fTags" value="${esc((d.tags || []).join("，"))}"></div>
       <div class="form-item full"><label>创作者（角色：名字，句号分隔）</label><input id="fCreators" value="${esc((d.creators || []).map(c => c.role + "：" + c.name).join("；"))}"></div>
+      <div class="form-item full"><label for="fImmersiveBackgrounds">沉浸背景图片链接（每行一张，最多 20 张）</label><textarea id="fImmersiveBackgrounds" rows="4" placeholder="https://… 横向图片更适合展厅">${esc((d.immersiveBackgroundUrls || (d.immersiveBackgroundUrl ? [d.immersiveBackgroundUrl] : [])).join("\n"))}</textarea><div class="tip">每行一张，调整行顺序即可调整顺序播放。全局播放方式和切换间隔在设置中调整。远程图片需联网显示。</div></div>
+      ${ArchiveV2.bgmEditor.form(d, 'workBgm')}
       <div class="form-item full"><label>简介</label><textarea id="fSummary" style="min-height:110px">${esc(d.summary || "")}</textarea></div>
       ${a.mode === "create" ? `
       <div class="form-item"><label>初始评分（可留空）</label>
@@ -1827,6 +1883,7 @@ function renderForm() {
     : `<button class="btn btn-ghost" id="addBack2">${ICONS.back} 重新搜索</button><button class="btn btn-primary" id="saveWork">保存入库</button>`;
   const cancelBtn = el("#addCancel"); if (cancelBtn) cancelBtn.onclick = closeAdd;
   const b2 = el("#addBack2"); if (b2) b2.onclick = () => { a.step = 2; renderAdd(); };
+  ArchiveV2.bgmEditor.bind(body, 'workBgm', toast);
   el("#saveWork").onclick = saveWork;
   if (a.mode === "edit") {
     elAll("[data-rfsrc]", body).forEach(x => x.onclick = () => {
@@ -1932,7 +1989,7 @@ async function applyRefill(draft) {
   if (a.mode !== "edit" || !a.editId) return;
   const r = await api(`/api/works/${a.editId}/refill`, { method: "POST", body: { draft } });
   if (!r.ok) return toast(r.error || "更新失败", true);
-  applyWork(r.work);
+
   a.draft = JSON.parse(JSON.stringify(r.work));
   a.refItems = [];
   renderWall(); renderStats(); renderAdd();
@@ -1940,6 +1997,8 @@ async function applyRefill(draft) {
 }
 
 async function saveWork() {
+  let bgm;
+  try { bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
   const a = S.add;
   const title = el("#fTitle").value.trim();
   if (!title) return toast("标题不能为空", true);
@@ -1954,6 +2013,8 @@ async function saveWork() {
     year: el("#fYear").value.trim(),
     tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
     summary: el("#fSummary").value.trim(),
+    immersiveBackgroundUrls: el("#fImmersiveBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+    bgm,
     creators,
   });
   const coverInput = el("#coverUrlInput");
@@ -1962,7 +2023,7 @@ async function saveWork() {
     draft.coverReferer = "";
   }
   if (a.mode === "edit") {
-    const payload = { title: draft.title, originalTitle: draft.originalTitle, year: draft.year, tags: draft.tags, summary: draft.summary, creators: draft.creators };
+    const payload = { title: draft.title, originalTitle: draft.originalTitle, year: draft.year, tags: draft.tags, summary: draft.summary, creators: draft.creators, immersiveBackgroundUrls: draft.immersiveBackgroundUrls, bgm:draft.bgm };
     if (coverInput && coverInput.value.trim()) payload.cover = coverInput.value.trim();
     if (a.youshuApplied) {
       if (draft.source && typeof draft.source === "object") payload.source = draft.source;
@@ -1976,7 +2037,7 @@ async function saveWork() {
     }
     const r = await api(`/api/works/${a.editId}`, { method: "PATCH", body: payload });
     if (!r.ok) return toast(r.error || "保存失败", true);
-    applyWork(r.work); closeAdd(); renderDrawer(); renderWall(); toast("已保存");
+    closeAdd(); renderDrawer(); renderWall(); toast("已保存");
     return;
   }
   if (a.tmdbRaw) return saveTmdbCreate();
@@ -1992,7 +2053,7 @@ async function saveWork() {
   const r = await api("/api/works", { method: "POST", body });
   btn.disabled = false;
   if (!r.ok) return toast(r.error || "保存失败", true);
-  applyWork(r.work);
+
   closeAdd(); renderTabs(); renderWall(); renderStats(); toast("已入库");
   openDrawer(r.work.id);
 }
@@ -2023,6 +2084,9 @@ function openSettings() {
       <label>写前快照保留份数（每日自动备份固定保留 15 天）</label>
       <input id="setKeep" type="number" min="5" max="200" value="${esc(st.backup_keep || 30)}">
     </div>
+    <div class="section-head" style="margin-top:20px"><h3>沉浸背景</h3><div class="line"></div></div>
+    <div class="option-line"><label class="opt-label" for="setBackgroundOrder">播放方式</label><select id="setBackgroundOrder" class="mini"><option value="ordered" ${st.immersive_background_order !== "random" ? "selected" : ""}>按作品行顺序</option><option value="random" ${st.immersive_background_order === "random" ? "selected" : ""}>随机切换</option></select></div>
+    <div class="form-item" style="margin-bottom:14px"><label for="setBackgroundInterval">切换间隔（秒）</label><input id="setBackgroundInterval" type="number" min="5" max="300" step="1" value="${esc(st.immersive_background_interval || 12)}"><div class="tip">全局生效，范围 5 到 300 秒。</div></div>
     <div class="section-head" style="margin-top:20px"><h3>导出与恢复</h3><div class="line"></div></div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn" id="expJson">导出 JSON</button>
@@ -2069,7 +2133,7 @@ function openSettings() {
     const r = await api("/api/clear-data", { method: "POST", body: { confirm: "清空全部" } });
     btn.disabled = false; btn.textContent = "清空全部数据";
     if (!r.ok) return toast(r.error || "清空失败", true);
-    await reloadAll();
+
     closeSettings();
     toast(`已清空 ${r.cleared.works} 部作品、${r.cleared.series} 个系列、${r.cleared.covers} 张封面；备份：${r.backup}`);
   };
@@ -2096,8 +2160,7 @@ function openSettings() {
     const r = await api("/api/import", { method: "POST", body });
     ev.target.value = "";
     if (!r.ok) return toast(r.error || "导入失败", true);
-    toast(`导入完成，当前共 ${r.count} 部` + (r.covers ? `，补回封面 ${r.covers} 张` : ""));
-    const b = await api("/api/bootstrap"); S.works = b.works; renderTabs(); renderWall(); renderStats();
+    toast(`导入完成，当前共 ${r.count} 部` + (r.covers ? `，补回封面 ${r.covers} 张` : "") + (r.audio ? `，补回音乐 ${r.audio} 首` : ""));
     loadBackups();
   };
   el("#recPasteBtn").onclick = () => {
@@ -2124,7 +2187,7 @@ async function doImportRecords(text, label) {
   const r = await api("/api/import-records", { method: "POST", body: { text } });
   if (!r.ok) return toast(r.error || "导入失败", true);
   toast(`${label}：新增 ${r.created} 部、补充 ${r.updated} 部、写入经历 ${r.experiences} 条`);
-  await reloadAll();
+
 }
 
 async function loadBackups() {
@@ -2144,12 +2207,6 @@ async function loadBackups() {
     const ok = await restoreBackup(x.dataset.rkind, x.dataset.restore);
     x.disabled = false;
     if (!ok) return;
-    const b = await api("/api/bootstrap");
-    if (b && b.works) {
-      S.works = b.works; S.settings = b.settings || S.settings;
-      S.undoAvailable = Boolean(b.undoAvailable); S.dataState = b.dataState || "normal";
-      updateUndoBtn(); renderTabs(); renderStatusChips(); renderWall(); renderStats();
-    }
     loadBackups();
   });
 }
@@ -2162,6 +2219,13 @@ function closeSettings() {
 
 /* ------------------------------------------------------------ 全局事件 */
 function bindGlobal() {
+  el("#syncRetry").onclick = async () => {
+    const btn = el("#syncRetry");
+    btn.disabled = true;
+    try {
+     if (await reloadAll()) { renderDrawer(); toast("数据已同步"); }
+    } finally { btn.disabled = false; }
+  };
   el("#searchInput").oninput = (e) => { S.filters.q = e.target.value; renderWall(); };
   elAll("#sortSelect").forEach(s => s.onchange = (e) => { S.filters.sort = e.target.value; renderWall(); });
   elAll("#timeSelect").forEach(s => s.onchange = (e) => { S.filters.time = e.target.value; renderWall(); });
@@ -2180,6 +2244,7 @@ function bindGlobal() {
   });
   elAll("#sizeSeg button").forEach(b => b.onclick = () => setSize(b.dataset.size));
   el("#newSeriesBtn").onclick = () => openSeriesModal();
+  el("#enterExhibit").onclick = () => openImmersive(null, "fullscreen");
   el("#seriesClose").onclick = closeSeriesModal;
   el("#seriesCancel").onclick = closeSeriesModal;
   el("#seriesModal").onclick = (e) => { if (e.target.id === "seriesModal") closeSeriesModal(); };
@@ -2189,7 +2254,9 @@ function bindGlobal() {
   el("#settingsClose2").onclick = closeSettings;
   el("#settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") closeSettings(); };
   el("#saveSettings").onclick = async () => {
-    const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30 };
+    const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30,
+      immersive_background_order: el("#setBackgroundOrder").value,
+      immersive_background_interval: Number(el("#setBackgroundInterval").value) || 12 };
     const r = await api("/api/settings", { method: "POST", body });
     if (!r.ok) return toast("保存失败", true);
     S.settings = r.settings; toast("设置已保存"); closeSettings();
@@ -2213,6 +2280,7 @@ function bindGlobal() {
       else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();
       else if (el("#settingsModal").classList.contains("show")) closeSettings();
       else if (S.currentId || S.currentSeriesId) closeDrawer();
+      else if (immersiveView?.isOpen()) immersiveView.close();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
       const tag = (document.activeElement.tagName || "").toUpperCase();
@@ -2222,7 +2290,7 @@ function bindGlobal() {
       doUndo();
       return;
     }
-    if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+    if (e.key === "/" && !activeOverlayRoot() && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault(); el("#searchInput").focus();
     }
   });

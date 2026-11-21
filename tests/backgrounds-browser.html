@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>沉浸多背景验收</title>
+<style>body{margin:0;font:14px system-ui;background:#eee;color:#222}header{padding:12px;display:flex;gap:12px;align-items:center}pre{white-space:pre-wrap;margin:0}iframe{display:block;height:850px;border:0}button{padding:8px 14px}</style>
+<header><button id="run">运行验收</button><pre id="result">等待运行</pre></header><iframe src="/" style="width:1200px"></iframe>
+<script>
+const frame=document.querySelector('iframe'),result=document.querySelector('#result');
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const check=(condition,message)=>{if(!condition)throw Error(message)};
+const waitFor=async(predicate,message,timeout=10000)=>{const end=Date.now()+timeout;while(Date.now()<end){if(predicate())return;await pause(30)}throw Error(message)};
+document.querySelector('#run').onclick=async()=>{
+  const button=document.querySelector('#run');button.disabled=true;result.textContent='验收中…';
+  try{
+    await waitFor(()=>frame.contentDocument?.querySelector('.exhibit-work'),'页面未启动');
+    const w=frame.contentWindow,d=frame.contentDocument,run=code=>w.eval(code);
+    run('openSettings()');
+    check(d.querySelector('#setBackgroundInterval').value==='5','未读取已保存的切换间隔');
+    check(d.querySelector('#setBackgroundOrder').value==='ordered','未读取已保存的播放顺序');
+    run('closeSettings();openEdit(findWork("fixture-0"))');
+    check(d.querySelector('#fImmersiveBackgrounds').value.split('\n').length===3,'作品编辑没有三张背景');
+    run('closeAdd();openImmersive("fixture-0","fullscreen")');
+    await waitFor(()=>d.querySelector('.im-scene img.is-visible'),'背景未加载');
+    for(const width of [320,375,768,1200]){
+      frame.style.width=width+'px';await pause(80);
+      for(const surface of ['overlay','fullscreen']){
+        d.querySelector(`[data-im-action="${surface}"]`).click();await pause(50);
+        const a=d.querySelector('.im-return').getBoundingClientRect(),b=d.querySelector('.im-catalog-toggle').getBoundingClientRect();
+        check(a.right<=b.left+1||b.right<=a.left+1||a.bottom<=b.top+1||b.bottom<=a.top+1,`${width}/${surface} 工具栏按钮重叠`);
+        const box=d.querySelector('.im-toolbar').getBoundingClientRect();
+        for(const node of d.querySelectorAll('.im-toolbar button')){const r=node.getBoundingClientRect();check(r.left>=box.left&&r.right<=box.right+1,`${width}/${surface} 工具栏越界`)}
+      }
+    }
+    frame.style.width='1200px';
+    const first=d.querySelector('.im-scene img.is-visible').src;
+    await waitFor(()=>d.querySelector('.im-scene img.is-visible')?.src!==first,'未定时切换');
+    check(d.querySelectorAll('.im-scene img').length===2,'切换时没有保留两张图');
+    await pause(150);
+    const opacity=Number(w.getComputedStyle(d.querySelector('.im-scene img.is-visible')).opacity);
+    check(opacity>0&&opacity<1,'图片没有淡入过渡');
+    await pause(1500);check(d.querySelectorAll('.im-scene img').length===1,'过渡结束未清理旧图');
+    const panelButton=d.querySelector('[data-im-action="catalog"]');panelButton.click();
+    check(!d.querySelector('.im-catalog').hidden,'目录打不开');
+    d.querySelector('[data-im-action="catalog-close"]').click();
+    run('immersiveView.close()');
+    await waitFor(()=>d.querySelector('#immersiveRoot').hidden,'沉浸关闭失败');
+    run('openImmersive("fixture-1","fullscreen")');
+    await waitFor(()=>d.querySelector('#immersiveRoot').dataset.background==='cover','没有背景时未回退封面');
+    check(w.getComputedStyle(d.querySelector('.im-art')).display!=='none','无背景作品丢失封面卡片');
+    run('immersiveView.close()');await waitFor(()=>d.querySelector('#immersiveRoot').hidden,'返回陈列失败');
+    run('openImmersive("fixture-0","fullscreen")');
+    result.textContent='PASS：8 组工具栏布局、旧数据读取、多图定时播放、双图淡入淡出、过渡清理、无背景回退、目录入口';
+  }catch(error){result.textContent='FAIL：'+error.message}
+  finally{button.disabled=false}
+};
+</script></html>

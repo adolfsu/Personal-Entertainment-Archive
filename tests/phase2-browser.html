@@ -1,0 +1,74 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>阶段 2 陈列验收</title>
+<style>body{margin:0;font:14px system-ui;background:#eee;color:#222}header{padding:12px;display:flex;gap:12px;align-items:center}#result{white-space:pre-wrap;margin:0}iframe{display:block;height:1100px;border:0;background:#000}button{padding:6px 12px}</style>
+<header><button id="matrix">运行布局矩阵</button><pre id="result">正在初始化…</pre></header><iframe src="/"></iframe>
+<script>
+(async()=>{
+  const frame=document.querySelector('iframe'),result=document.querySelector('#result');
+  const params=new URLSearchParams(location.search);
+  frame.style.width=(Number(params.get('width'))||1200)+'px';
+  const check=(ok,message)=>{if(!ok)throw Error(message)};
+  const settle=()=>new Promise(resolve=>frame.contentWindow.requestAnimationFrame(()=>frame.contentWindow.requestAnimationFrame(resolve)));
+  let matrixRunning=false;
+  try{
+    for(let i=0;i<100;i++){
+      await new Promise(resolve=>setTimeout(resolve,50));
+      if(frame.contentDocument?.querySelector('.exhibit-series')) break;
+    }
+    const w=frame.contentWindow,d=frame.contentDocument,run=code=>w.eval(code);
+    const configure=async(width,theme,mode,size)=>{
+      frame.style.width=width+'px';
+      run(`APPEARANCE.theme=${JSON.stringify(theme)};APPEARANCE.mode=${JSON.stringify(mode)};APPEARANCE.size=${JSON.stringify(size)};applyAppearance(false);renderWall()`);
+      await settle();
+    };
+    await configure(Number(params.get('width'))||1200,params.get('theme')||'stage',params.get('mode')||'dark',params.get('size')||'small');
+    check(d.querySelector('.exhibit-series'),'系列卡片未显示');
+    check(d.querySelector('.exhibit-work .exhibit-label'),'单作品展签未显示');
+    run('S.filters.q="重返";renderWall()');
+    check(d.querySelector('.exhibit-series-count').textContent.includes('当前匹配 1 部'),'匹配数错误');
+    check(d.querySelector('.exhibit-progress-label').textContent.includes('1 / 3'),'筛选改变了全系列进度');
+    run('S.filters.q="";S.filters.group="flat";renderWall()');
+    check(d.querySelectorAll('.exhibit-work').length===run('S.works.length'),'平铺遗漏作品');
+    const card=d.querySelector('.exhibit-work');
+    card.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+    check(d.querySelector('#drawer').classList.contains('show'),'键盘不能打开原详情');
+    run('closeDrawer();S.filters.group="series";renderWall()');
+    d.querySelector('.exhibit-series').click();
+    check(d.querySelector('#drawerTitle').textContent==='星际漫游典藏','系列详情入口错误');
+    run('closeDrawer()');
+    // 等待本地故障封面的 error 及一次代表图回退完成。
+    for(let i=0;i<60;i++){
+      if([...d.querySelectorAll('img[data-exhibit-image]')].every(img=>img.hidden||img.complete))break;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    check([...d.querySelectorAll('img[data-exhibit-image]')].every(img=>img.hidden||img.naturalWidth>0),'失败图片未显示占位');
+    check(d.querySelector('.exhibit-series-visual img').naturalWidth>0,'系列代表图失败后未尝试可用成员封面');
+    w.scrollTo(0,0);window.scrollTo(0,0);
+    result.textContent='PASS：卡片结构、筛选匹配数、原详情键盘/点击入口、图片回退';
+    document.querySelector('#matrix').onclick=async()=>{
+      if(matrixRunning)return;matrixRunning=true;
+      const button=document.querySelector('#matrix');button.disabled=true;
+      try{
+        let count=0;
+        for(const width of [320,375,768,1024,1440])for(const theme of ['stage','shelf'])for(const mode of ['dark','light'])for(const size of ['small','medium','large']){
+          await configure(width,theme,mode,size);
+          const wall=d.querySelector('#wall'),box=wall.getBoundingClientRect();
+          for(const item of wall.querySelectorAll('.exhibit-work,.exhibit-series')){
+            const r=item.getBoundingClientRect();
+            check(r.left>=box.left-1&&r.right<=box.right+1,`${width}/${theme}/${mode}/${size} 卡片超出网格`);
+            check(item.scrollWidth<=item.clientWidth+1,`${width}/${theme}/${mode}/${size} 卡片内部溢出`);
+          }
+          const seriesCard=wall.querySelector('.exhibit-series'),info=seriesCard.querySelector('.exhibit-series-info');
+          check(info.getBoundingClientRect().bottom<=seriesCard.getBoundingClientRect().bottom+1,`${width}/${theme}/${size} 系列内容被裁切`);
+          const columns=w.getComputedStyle(wall).gridTemplateColumns.trim().split(/\s+/).length;
+          if(columns===1)check(w.getComputedStyle(wall).getPropertyValue('--exhibit-series-span').trim()==='1','单列系列仍跨两列');
+          count++;
+        }
+        await configure(Number(params.get('width'))||1200,params.get('theme')||'stage',params.get('mode')||'dark',params.get('size')||'small');
+        result.textContent=`PASS：${count} 组布局（宽度 × 主题 × 明暗 × 密度）及卡片交互/回退检查`;
+      }catch(error){result.textContent='FAIL：'+error.message}
+      finally{matrixRunning=false;button.disabled=false}
+    };
+    if(params.has('matrix'))document.querySelector('#matrix').click();
+  }catch(error){result.textContent='FAIL：'+error.message}
+})();
+</script></html>
