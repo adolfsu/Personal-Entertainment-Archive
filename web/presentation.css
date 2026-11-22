@@ -17,7 +17,7 @@
 }
 .wall.exhibit-grid{
   --exhibit-column-width:148px;
-  --exhibit-series-span:1;
+  --exhibit-series-span:2;
   --exhibit-row-height:calc(var(--exhibit-column-width) * 1.5 + var(--exhibit-label-height));
   align-items:start;
 }

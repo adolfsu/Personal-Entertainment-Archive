@@ -71,7 +71,7 @@ class TestAudio(core.ServerCase):
         _, data = core.http_json('POST','/api/series',{'name':'音乐'})
         path = '/api/series/'+data['series']['id']
         before=core.read_bytes(core.server.LIB_PATH)
-        for music in ['bad',{'src':'javascript:alert(1)'},{'src':'file:///x.mp3'},{'src':'http://example.com/a.mp3'}, {'src':'/audio/../library.json'}, {'src':'https://user:pass@example.com/a'}]:
+        for music in ['bad',{'src':'javascript:alert(1)'},{'src':'file:///x.mp3'},{'src':'http://example.com/a.mp3'}, {'src':'/audio/../library.json'}, {'src':'https://user:pass@example.com/a'}, {'src':'https://example.com/a.mp3','artist':7}]:
             self.assertEqual(core.http_json('PATCH',path,{'bgm':music})[0],400)
             self.assertEqual(core.read_bytes(core.server.LIB_PATH),before)
         status, data=core.http_json('PATCH',path,{'bgm':{'src':'https://example.com/a.mp3','title':'曲名'}})

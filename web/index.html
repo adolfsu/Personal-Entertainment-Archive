@@ -12,6 +12,7 @@ try{
   if (m) document.documentElement.dataset.mode = m;
   if (t) document.documentElement.dataset.theme = t;
   if (z) document.documentElement.dataset.size = z;
+  if (localStorage.getItem('grdag_sidebar_collapsed') === 'true') document.documentElement.dataset.sidebarCollapsed = 'true';
 }catch(e){}
 </script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23f2f2f7'/%3E%3Crect x='14' y='14' width='36' height='7' rx='2' fill='%230088ff'/%3E%3Cpath d='M18 21v28h28V21' stroke='%230088ff' stroke-width='3' fill='none'/%3E%3Cpath d='M27 33h10' stroke='%230088ff' stroke-width='3'/%3E%3C/svg%3E">
@@ -22,6 +23,8 @@ try{
 <link rel="stylesheet" href="/static/immersive-audio.css">
 <link rel="stylesheet" href="/static/archive-ui.css">
 <link rel="stylesheet" href="/static/home.css">
+<link rel="stylesheet" href="/static/background-editor.css">
+<link rel="stylesheet" href="/static/audio-player.css">
 </head>
 <body>
 
@@ -38,6 +41,7 @@ try{
     <button class="sidebar-nav-item" id="navImmersive" title="沉浸浏览">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4"/><circle cx="9" cy="8" r="1"/></svg><span>沉浸浏览</span>
     </button>
+    <button class="sidebar-nav-item" id="musicOpenBtn" title="音乐列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span>音乐列表</span></button>
   </nav>
   <div class="sidebar-spacer"></div>
   <div class="sidebar-global" aria-label="全局操作">
@@ -55,7 +59,7 @@ try{
 <div class="app-shell" id="appShell" data-view="home">
 
 <header class="topbar" id="topbar">
-  <button class="icon-btn sidebar-toggle" id="sidebarToggle" title="打开导航" aria-label="打开导航" aria-expanded="false">
+  <button class="icon-btn sidebar-toggle" id="sidebarToggle" title="打开导航" aria-label="打开导航" aria-expanded="false" aria-controls="appSidebar">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
   </button>
   <div class="brand">
@@ -145,6 +149,23 @@ try{
 </aside>
 </main>
 
+<div class="modal" id="musicModal" role="dialog" aria-modal="true" aria-labelledby="musicTitle" aria-hidden="true">
+  <div class="modal-box music-modal-box">
+    <div class="modal-head"><h2 id="musicTitle">音乐播放器</h2><button class="icon-btn" id="musicClose" aria-label="关闭音乐列表"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <section class="audio-player" id="audioPlayer" aria-label="音乐播放器">
+      <div class="audio-player-track"><strong data-player-title>未选择歌曲</strong><span data-player-artist>选择一首歌曲开始播放</span><small data-player-status></small></div>
+      <div class="audio-player-controls"><button type="button" data-player-action="previous" aria-label="上一首" title="上一首" disabled>◀</button><button type="button" data-player-action="toggle" aria-label="播放">播放</button><button type="button" data-player-action="next" aria-label="下一首" title="下一首" disabled>▶</button></div>
+      <label class="audio-player-volume"><span>音量</span><input type="range" min="0" max="100" step="1" data-player-volume aria-label="音乐音量"><output data-player-volume-value>20%</output></label>
+      <span class="audio-player-mode" data-player-mode-label>沉浸</span>
+    </section>
+    <div class="music-modal-controls"><div class="seg music-mode" role="group" aria-label="播放模式"><button type="button" data-audio-mode="global" aria-pressed="false">全局播放</button><button type="button" data-audio-mode="immersive" aria-pressed="true">沉浸模式</button><button type="button" data-audio-mode="playlist" aria-pressed="false">歌单沉浸</button></div>
+      <div class="music-list-tools"><input type="search" id="musicSearch" placeholder="搜索歌曲名、演唱者或作品" aria-label="搜索音乐"><select id="musicCategory" aria-label="按作品分类筛选"><option value="all">全部分类</option><option value="anime">动漫</option><option value="manga">漫画</option><option value="game">游戏</option><option value="novel">网文</option><option value="book">出版书</option><option value="movie">影视剧</option><option value="shortdrama">短剧</option></select><label class="music-shuffle"><input id="musicShuffle" type="checkbox"><span>随机播放</span></label></div>
+    </div>
+    <div class="modal-body music-track-list" id="musicTrackList" role="list"></div>
+    <div class="modal-foot"><span class="music-count" id="musicCount"></span><button class="btn" id="musicCancel">关闭</button><button class="btn btn-primary" id="musicStart">播放全部</button></div>
+  </div>
+</div>
+
 <div class="modal" id="addModal" role="dialog" aria-modal="true" aria-labelledby="addTitle" aria-hidden="true">
   <div class="modal-box">
     <div class="modal-head">
@@ -213,11 +234,15 @@ try{
 </div>
 
  </div>
+<button type="button" class="audio-player-launch" id="audioPlayerLaunch" aria-label="打开音乐播放器" title="音乐播放器">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span class="audio-player-launch-state" aria-hidden="true"></span>
+</button>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/static/presentation-core.js"></script>
 <script src="/static/exhibit-cards.js"></script>
 <script src="/static/browse-session.js"></script>
 <script src="/static/immersive-background.js"></script>
+<script src="/static/background-editor.js"></script>
 <script src="/static/series-immersive.js"></script>
 <script src="/static/immersive-audio.js"></script>
 <script src="/static/bgm-editor.js"></script>

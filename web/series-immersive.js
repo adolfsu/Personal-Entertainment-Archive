@@ -4,7 +4,7 @@
   const score = value => value == null ? "未评分" : Number(value).toFixed(1);
   function images(entity) {
     const raw = Array.isArray(entity?.immersiveBackgroundUrls) ? entity.immersiveBackgroundUrls : [entity?.immersiveBackgroundUrl];
-    return [...new Set(raw.map(ArchiveV2.backgrounds.safeRemoteUrl).filter(Boolean))];
+    return [...new Set(raw.map(ArchiveV2.backgrounds.safeBackgroundUrl).filter(Boolean))];
   }
   function members(series, getWork) {
     return (series.members || []).map(member => getWork(member.id)).filter(Boolean);

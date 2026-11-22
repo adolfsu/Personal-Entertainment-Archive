@@ -33,8 +33,7 @@
   function create({ root, getWork, getWorks, getSeries = () => null, getLabels, getBackgroundSettings = () => ({}), openDetails, openSeriesDetails, closeDetails, captureOrigin, restoreOrigin, mainRoots, notify = () => {} }) {
     const loader = ArchiveV2.backgrounds.createLoader();
     const seriesBackgrounds = ArchiveV2.seriesImmersive.createBackgrounds();
-    const music = ArchiveV2.audio.create({onChange: syncMusic});
-    let musicPanelOpen = false;
+    const music = ArchiveV2.audioPlayer;
     let session = null, lastSession = null, detail = false, origin = null;
     let inertBefore = [], overflowBefore = "", scrollRestorationBefore = "auto", transitionPending = false;
     const historyState = () => history.state?.archiveImmersive;
@@ -45,35 +44,12 @@
     function viewControls() {
       const bright = backgroundTone === "bright";
       return `<div class="im-toolbar-controls"><button type="button" class="im-button im-brightness" data-im-action="brightness" aria-label="明亮背景" aria-pressed="${bright}" title="背景：${bright ? "明亮，点击切换为柔和" : "柔和，点击切换为明亮"}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg><span>${bright ? "明亮" : "柔和"}</span></button>
-        <button type="button" class="im-button im-music-toggle" data-im-action="music" aria-label="背景音乐" aria-expanded="${musicPanelOpen}" aria-controls="imMusicPanel" title="背景音乐"><span aria-hidden="true">♫</span><span class="im-music-label">音乐</span></button>
+        <button type="button" class="im-button im-music-toggle" data-im-action="music" aria-label="打开音乐播放列表" title="音乐播放列表"><span aria-hidden="true">♫</span><span class="im-music-label">音乐</span></button>
         <div class="im-surfaces" role="group" aria-label="沉浸呈现方式"><button type="button" class="im-button" data-im-action="overlay" aria-pressed="${session.surface === "overlay"}">浮层</button><button type="button" class="im-button" data-im-action="fullscreen" aria-pressed="${session.surface === "fullscreen"}">全屏展厅</button></div></div>`;
     }
     function mountMusic() {
-      root.querySelector('.im-window').insertAdjacentHTML('beforeend', `<aside id="imMusicPanel" class="im-music-panel" aria-label="背景音乐控制" ${musicPanelOpen ? "" : "hidden"}><div class="im-catalog-head"><strong>背景音乐</strong><button type="button" data-im-action="music-close" aria-label="关闭音乐面板">×</button></div><p class="im-music-title"></p><p class="im-music-status" role="status" aria-live="polite"></p>
-        <label class="im-music-option"><span>启用沉浸音乐</span><input type="checkbox" data-im-music="enabled"></label>
-        <button type="button" class="im-button im-music-play" data-im-action="music-play">播放</button>
-        <label class="im-music-option"><span>音量 <output data-im-music-volume></output></span><input type="range" min="0" max="100" step="1" data-im-music="volume" aria-label="背景音乐音量"></label>
-        <label class="im-music-option"><span>单曲循环</span><input type="checkbox" data-im-music="loop"></label>
-        <label class="im-music-option"><span>离开标签页时暂停</span><input type="checkbox" data-im-music="pauseHidden"></label><p class="im-music-hint">开启后随作品切换；暂停后翻页也保持暂停。音乐与图片轮播分别控制。</p></aside>`);
-      const panel = root.querySelector('.im-music-panel');
-      panel.style.setProperty('--im-music-top', `${root.querySelector('.im-toolbar').offsetHeight + 4}px`);
       const series = session.seriesId ? getSeries(session.seriesId) : null;
       music.setTarget(ArchiveV2.audio.resolve(getWork(session.currentId), series, session.page === 'series'));
-      syncMusic(music.snapshot());
-    }
-    function syncMusic(state) {
-      const panel = root.querySelector('.im-music-panel'), button = root.querySelector('[data-im-action="music"]');
-      if (!panel || !button) return;
-      button.dataset.playing = String(state.state === 'playing');
-      button.title = state.state === 'playing' ? `正在播放：${state.target?.title || '背景音乐'}` : '背景音乐';
-      panel.querySelector('.im-music-title').textContent = state.target ? state.target.title : '当前没有绑定音乐';
-      const labels = {off:'音乐已关闭',empty:'可在作品或系列详情中设置 BGM',loading:'正在加载音乐…',playing:state.target?.owner || '正在播放',paused:'已暂停，切换作品也保持暂停',hidden:'离开标签页，已暂停',ended:'播放结束',idle:'等待播放'};
-      panel.querySelector('.im-music-status').textContent = state.error || labels[state.state] || '';
-      const play = panel.querySelector('[data-im-action="music-play"]');
-      play.textContent = ['playing','loading'].includes(state.state) ? '暂停' : state.state === 'blocked' ? '点击播放' : state.state === 'error' ? '重试播放' : '播放'; play.disabled = !state.target;
-      for (const field of ['enabled','loop','pauseHidden']) panel.querySelector(`[data-im-music="${field}"]`).checked = state[field];
-      panel.querySelector('[data-im-music="volume"]').value = Math.round(state.volume * 100);
-      panel.querySelector('[data-im-music-volume]').textContent = `${Math.round(state.volume * 100)}%`;
     }
     function toggleBackgroundTone() {
       backgroundTone = backgroundTone === "bright" ? "soft" : "bright";
@@ -105,7 +81,7 @@
       if (detail) closeDetails();
       lastSession = { ...session, ids: session.ids.slice() };
       session = null; detail = false; transitionPending = false; loader.cancel(); seriesBackgrounds.cancel();
-      music.close(); musicPanelOpen = false;
+      music.close();
       root.hidden = true; root.innerHTML = "";
       inertBefore.forEach(([node, value]) => { node.inert = value; }); inertBefore = [];
       document.body.style.overflow = overflowBefore;
@@ -257,15 +233,7 @@
       if (!action || transitionPending) return;
       if (action === "close") close();
       else if (action === "brightness") toggleBackgroundTone();
-      else if (action === "music" || action === "music-close") {
-        musicPanelOpen = action === 'music' && !musicPanelOpen;
-        const panel = root.querySelector('.im-music-panel'); panel.hidden = !musicPanelOpen;
-        panel.style.setProperty('--im-music-top', `${root.querySelector('.im-toolbar').offsetHeight + 4}px`);
-        root.querySelector('[data-im-action="music"]').setAttribute('aria-expanded', String(musicPanelOpen));
-        if (musicPanelOpen) { root.querySelector('.im-catalog')?.setAttribute('hidden',''); root.querySelector('[data-im-action="catalog"]')?.setAttribute('aria-expanded','false'); }
-        root.querySelector(musicPanelOpen ? '[data-im-action="music-play"]' : '[data-im-action="music"]')?.focus({preventScroll:true});
-      }
-      else if (action === 'music-play') music.toggle();
+      else if (action === "music") document.dispatchEvent(new Event('archive-music-open'));
       else if (action === "previous") navigate(-1);
       else if (action === "next") navigate(1);
       else if (action === "details") showDetails();
@@ -278,7 +246,6 @@
       else if (action === "catalog" || action === "catalog-close") {
         const panel = root.querySelector(".im-catalog");
         const open = action === "catalog" && panel.hidden;
-        if (open) { musicPanelOpen = false; root.querySelector('.im-music-panel').hidden = true; root.querySelector('[data-im-action="music"]').setAttribute('aria-expanded','false'); }
         panel.style.setProperty("--im-catalog-top", `${root.querySelector(".im-toolbar").offsetHeight + 4}px`);
         panel.hidden = !open;
         root.querySelector(".im-catalog-toggle")?.setAttribute("aria-expanded", open);
@@ -310,8 +277,6 @@
       else if (field === 'loop') music.setLoop(event.target.checked);
       else if (field === 'pauseHidden') music.setPauseHidden(event.target.checked);
     };
-    document.addEventListener('visibilitychange', () => music.visibility(document.hidden));
-    document.addEventListener('archive-audio-preview', () => { if (session && ['playing','loading'].includes(music.snapshot().state)) music.toggle(); });
     window.addEventListener('pagehide', () => music.destroy());
     function filterMembers() {
       if (session?.page !== "series") return;
@@ -338,11 +303,6 @@
     };
     root.onfocusout = event => { if (session?.page === "series" && event.target.closest("[data-im-member]")) seriesBackgrounds.resume(); };
     root.onkeydown = event => {
-      if (event.key === 'Escape' && musicPanelOpen) {
-        event.preventDefault(); event.stopPropagation(); musicPanelOpen = false;
-        root.querySelector('.im-music-panel').hidden = true; root.querySelector('[data-im-action="music"]').setAttribute('aria-expanded','false'); root.querySelector('[data-im-action="music"]').focus(); return;
-      }
-      if (event.target.closest('.im-music-panel')) return;
       const catalog = root.querySelector(".im-catalog");
       if (event.key === "Escape" && catalog && !catalog.hidden) {
         event.preventDefault(); event.stopPropagation(); catalog.hidden = true;
@@ -383,6 +343,15 @@
         origin = captureOrigin(seriesId); detail = false; lock(); render(); writeHistory(true);
       },
       close, returnFromDetails,
+      playWork(id) {
+        const work = getWork(id);
+        if (!work) return false;
+        if (!session) return false;
+        if (!session.ids.includes(id)) session.ids = [...new Set([id, ...session.ids])];
+        detail = false; session.page = "work"; session.currentId = id; session.contentScroll = 0;
+        session.seriesId = null; session.source = "音乐播放列表";
+        render(); writeHistory(); return true;
+      },
       isOpen: () => !!session,
       isDetail: () => detail,
       overlayRoot: () => session && !detail ? root : null,

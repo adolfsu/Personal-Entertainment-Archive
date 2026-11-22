@@ -49,7 +49,12 @@ class TestBackgrounds(core.ServerCase):
         self.assertEqual(data['settings']['immersive_background_interval'], 8)
         self.assertEqual(data['settings']['immersive_background_order'], 'random')
         before = core.read_bytes(core.server.LIB_PATH)
-        for invalid in [{'immersive_background_interval': 0}, {'immersive_background_interval': 301}, {'immersive_background_order': 'invalid'}]:
+        status, data = core.http_json('POST', '/api/settings', {'immersive_background_interval': 3})
+        self.assertEqual(status, 200, data)
+        _, data = core.http_json('GET', '/api/bootstrap')
+        self.assertEqual(data['settings']['immersive_background_interval'], 3)
+        before = core.read_bytes(core.server.LIB_PATH)
+        for invalid in [{'immersive_background_interval': 2}, {'immersive_background_interval': 301}, {'immersive_background_order': 'invalid'}]:
             status, data = core.http_json('POST', '/api/settings', invalid)
             self.assertEqual(status, 400, data)
             self.assertEqual(core.read_bytes(core.server.LIB_PATH), before)

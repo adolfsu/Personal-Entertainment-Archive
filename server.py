@@ -75,6 +75,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 COVER_DIR = os.path.join(DATA_DIR, "covers")
 AUDIO_DIR = os.path.join(DATA_DIR, "audio")
 AUDIO_LIMIT = 30 * 1024 * 1024
+BACKGROUND_IMAGE_LIMIT = 20 * 1024 * 1024
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
 DAILY_BACKUP_DIR = os.path.join(BACKUP_DIR, "daily")          # 每日自动备份，只保留最近 15 天
 PRE_RESTORE_DIR = os.path.join(BACKUP_DIR, "pre-restore")     # 恢复/撤销前的安全快照，不参与自动清理
@@ -2250,7 +2251,7 @@ def parse_hongguo_link(url):
 
 # ---------------------------------------------------------------- 草稿 → 作品
 def validate_immersive_background(value):
-    """背景仅保存用户提供的链接，不抓取、不下载、不覆盖封面。"""
+    """兼容旧远程背景与保存在封面资源目录中的本地背景。"""
     if value is None or value == "":
         return ""
     if not isinstance(value, str) or len(value) > 4096:
@@ -2258,6 +2259,8 @@ def validate_immersive_background(value):
     value = value.strip()
     if not value:
         return ""
+    if re.fullmatch(r"/?covers/[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)", value):
+        return "/" + value.lstrip("/")
     try:
         parsed = urlparse(value)
         valid = (parsed.scheme.lower() in ("http", "https") and parsed.netloc and parsed.hostname
@@ -2267,6 +2270,73 @@ def validate_immersive_background(value):
     if not valid or re.search(r"[\s\x00-\x1f\x7f]", value):
         raise ValueError("沉浸背景请填写完整的 HTTP 或 HTTPS 图片链接")
     return value
+
+
+def download_background_image(url):
+    """有界下载用户明确添加的图片直链，沿用现有代理设置。"""
+    try:
+        proxy = resolve_proxy()
+    except Exception:
+        proxy = None
+    proxies = [proxy, None] if proxy else [None]
+    for px in proxies:
+        try:
+            opener = build_opener(ProxyHandler({"http": px, "https": px} if px else {}))
+            parsed = urlparse(url)
+            request = Request(url, headers={"User-Agent": UA, "Accept": "image/*",
+                                           "Referer": f"{parsed.scheme}://{parsed.netloc}/"})
+            with opener.open(request, timeout=15) as response:
+                if response.status != 200:
+                    continue
+                declared = response.headers.get("Content-Length", "")
+                if declared.isdigit() and int(declared) > BACKGROUND_IMAGE_LIMIT:
+                    raise ValueError("沉浸图片不能超过 20 MB")
+                raw = response.read(BACKGROUND_IMAGE_LIMIT + 1)
+                if len(raw) > BACKGROUND_IMAGE_LIMIT:
+                    raise ValueError("沉浸图片不能超过 20 MB")
+                return raw
+        except (HTTPError, URLError, OSError):
+            continue
+    raise ValueError("图片下载失败，请确认是可访问的图片直链后重试")
+
+
+def save_immersive_image(value):
+    url = validate_immersive_background(value)
+    if not url or url.startswith("/covers/"):
+        raise ValueError("请填写完整的 HTTP 或 HTTPS 图片直链")
+    raw = download_background_image(url)
+    if not raw or len(raw) > BACKGROUND_IMAGE_LIMIT:
+        raise ValueError("沉浸图片为空或超过 20 MB")
+    size = _image_size(raw)
+    if not size:
+        raise ValueError("链接没有返回有效的 PNG、JPEG、WebP 或 GIF 图片")
+    name = "background_" + hashlib.sha256(raw).hexdigest() + _image_ext(raw, url)
+    with _lock:
+        load_library()  # 下载期间档案损坏时也不能继续写入资源。
+        ensure_dirs()
+        path = os.path.join(COVER_DIR, name)
+        if not os.path.exists(path):
+            atomic_write_bytes(path, raw)
+    return {"url": "/covers/" + name, "width": size[0], "height": size[1], "bytes": len(raw)}
+
+
+def add_images_to_zip(archive, lib):
+    """封面与本地沉浸原图一起迁移；相同资源只打包一次。"""
+    paths = set()
+    for item in lib.get("works", []) + lib.get("series", []):
+        cover = (item.get("cover") or "").lstrip("/")
+        if cover.startswith("covers/") and os.path.basename(cover) == cover[len("covers/"):]:
+            paths.add(cover)
+        backgrounds = item.get("immersiveBackgroundUrls")
+        if not isinstance(backgrounds, list):
+            backgrounds = [item.get("immersiveBackgroundUrl")]
+        for value in backgrounds:
+            if isinstance(value, str) and re.fullmatch(r"/?covers/[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)", value):
+                paths.add(value.lstrip("/"))
+    for relative in sorted(paths):
+        path = os.path.join(COVER_DIR, os.path.basename(relative))
+        if os.path.isfile(path):
+            archive.write(path, relative)
 
 
 def apply_immersive_background(target, payload):
@@ -2294,9 +2364,10 @@ def validate_bgm(value):
         return None
     if not isinstance(value, dict):
         raise ValueError("背景音乐配置格式不正确")
-    src, title = value.get("src", ""), value.get("title", "")
-    if not isinstance(src, str) or not isinstance(title, str) or len(title) > 200:
-        raise ValueError("背景音乐链接或曲名格式不正确（曲名最多 200 字）")
+    src, title, artist = value.get("src", ""), value.get("title", ""), value.get("artist", "")
+    if (not isinstance(src, str) or not isinstance(title, str) or not isinstance(artist, str)
+            or len(title) > 200 or len(artist) > 200):
+        raise ValueError("背景音乐链接、曲名或演唱者格式不正确（曲名和演唱者各最多 200 字）")
     src = src.strip()
     if not src:
         return None
@@ -2308,7 +2379,7 @@ def validate_bgm(value):
             valid = False
         if not valid or len(src) > 4096 or re.search(r"[\s\x00-\x1f\x7f]", src):
             raise ValueError("背景音乐请使用本地导入的 MP3 或完整的 HTTPS 音频直链")
-    return {"src": src, "title": title.strip() or "背景音乐"}
+    return {"src": src, "title": title.strip() or "背景音乐", "artist": artist.strip()}
 
 
 def apply_bgm(target, payload):
@@ -3496,7 +3567,7 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.exists(path):
             atomic_write_bytes(path, raw)
         title = unquote(self.headers.get("X-Audio-Name", "背景音乐"))[:200]
-        return self.send_json({"ok": True, "bgm": {"src": "/audio/" + name, "title": title}, "bytes": length})
+        return self.send_json({"ok": True, "bgm": {"src": "/audio/" + name, "title": title, "artist": ""}, "bytes": length})
 
     # --- 路由
     def do_GET(self):
@@ -3580,6 +3651,10 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/audio":
                 return self.handle_audio_upload()
             body = self.read_body()
+            if p == "/api/backgrounds":
+                with _lock:
+                    load_library()
+                return self.send_json({"ok": True, "image": save_immersive_image(body.get("url"))})
             if p == "/api/search":
                 return self.handle_search(body)
             if p == "/api/resolve":
@@ -4211,18 +4286,7 @@ class Handler(BaseHTTPRequestHandler):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("library.json", json.dumps(lib, ensure_ascii=False, indent=1))
-            for w in lib["works"]:
-                cov = w.get("cover") or ""
-                if cov.startswith("covers/"):
-                    fp = os.path.join(DATA_DIR, cov)
-                    if os.path.exists(fp):
-                        z.write(fp, cov)
-            for s in lib.get("series", []):
-                cov = s.get("cover") or ""
-                if cov.startswith("covers/"):
-                    fp = os.path.join(DATA_DIR, cov)
-                    if os.path.exists(fp):
-                        z.write(fp, cov)
+            add_images_to_zip(z, lib)
             add_audio_to_zip(z, lib)
         name = f"archive_with_covers_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
         return self._send(200, buf.getvalue(), "application/zip",
@@ -4300,12 +4364,7 @@ class Handler(BaseHTTPRequestHandler):
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("library.json", json.dumps(lib, ensure_ascii=False, indent=1))
             add_audio_to_zip(z, lib, all_files=True)
-            for item in list(lib.get("works") or []) + list(lib.get("series") or []):
-                cov = item.get("cover") or ""
-                if cov.startswith("covers/"):
-                    fp = os.path.join(DATA_DIR, cov)
-                    if os.path.exists(fp):
-                        z.write(fp, cov)
+            add_images_to_zip(z, lib)
         with open(path, "wb") as f:
             f.write(buf.getvalue())
         cleared = {"works": len(lib.get("works") or []), "series": len(lib.get("series") or []),
@@ -4357,9 +4416,9 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     interval = int(body["immersive_background_interval"])
                 except (TypeError, ValueError):
-                    raise ValueError("背景切换间隔必须是 5 到 300 秒")
-                if not 5 <= interval <= 300:
-                    raise ValueError("背景切换间隔必须是 5 到 300 秒")
+                    raise ValueError("背景切换间隔必须是 3 到 300 秒")
+                if not 3 <= interval <= 300:
+                    raise ValueError("背景切换间隔必须是 3 到 300 秒")
                 lib["settings"]["immersive_background_interval"] = interval
             if "immersive_background_order" in body:
                 order = body["immersive_background_order"]

@@ -46,6 +46,18 @@ const S = {
   backups: [], undoAvailable: false, dataState: "normal", syncPending: false,
 };
 let immersiveView = null;
+let musicSearch = "";
+let musicCategory = "all";
+let musicPlaylistOpen = false;
+const audioPlayer = ArchiveV2.audio.create({
+  onChange: updateAudioPlayerUI,
+  onNavigate: navigateAudioTrack,
+});
+ArchiveV2.audioPlayer = audioPlayer;
+document.addEventListener("visibilitychange", () => audioPlayer.visibility(document.hidden));
+document.addEventListener("archive-audio-preview", () => {
+  if (["playing", "loading"].includes(audioPlayer.snapshot().state)) audioPlayer.play();
+});
 
 /* ------------------------------------------------------------ 外观（明暗 / 主题） */
 const APPEARANCE = {
@@ -198,6 +210,7 @@ async function api(path, opts = {}) {
      }
      if (path === "/api/clear-data" || path === "/api/recover/new-start") { S.works = []; S.series = []; }
      await refreshSnapshot(true);
+      refreshAudioCatalog();
     }
     return out;
   };
@@ -258,6 +271,7 @@ async function boot() {
   S.seriesKinds = data.seriesKinds || {};
   S.seriesRoles = data.seriesRoles || {};
   S.settings = data.settings || {};
+  refreshAudioCatalog();
   S.version = data.version || "未标注";
   S.versionFile = data.versionFile || "";
   S.versionStale = Boolean(data.versionStale);
@@ -279,6 +293,84 @@ async function boot() {
   renderStats();
   renderHome();
   bindGlobal();
+}
+
+function refreshAudioCatalog() {
+  audioPlayer.setCatalog(ArchiveV2.audio.playlist(S.works, S.series));
+  updateAudioQueue();
+}
+
+function filteredAudioCatalog() {
+  const query = musicSearch.trim().toLocaleLowerCase();
+  return audioPlayer.catalog().filter(track => (musicCategory === "all" || track.category === musicCategory) &&
+    (!query || [track.title, track.artist, track.workTitle].some(value => String(value || "").toLocaleLowerCase().includes(query))));
+}
+
+function updateAudioPlayerUI(state) {
+  const bar = el("#audioPlayer");
+  if (!bar?.querySelector) return;
+  bar.dataset.playing = String(state.state === "playing");
+  bar.querySelector("[data-player-title]").textContent = state.track?.title || "未选择歌曲";
+  bar.querySelector("[data-player-artist]").textContent = state.track?.artist || state.track?.workTitle || "打开音乐列表";
+  bar.querySelector("[data-player-status]").textContent = state.error || (state.state === "blocked" ? "点击播放以允许音乐" : state.state === "loading" ? "正在加载" : "");
+  const toggle = bar.querySelector('[data-player-action="toggle"]');
+  toggle.textContent = ["playing", "loading"].includes(state.state) ? "暂停" : "播放";
+  toggle.setAttribute("aria-label", toggle.textContent);
+  toggle.disabled = state.mode === "immersive" && !state.target;
+  bar.querySelector('[data-player-action="previous"]').disabled = state.queueCount < 2 || state.mode === "immersive";
+  bar.querySelector('[data-player-action="next"]').disabled = state.queueCount < 2 || state.mode === "immersive";
+  bar.querySelector("[data-player-mode-label]").textContent = ({global:"全局", immersive:"沉浸", playlist:"歌单"})[state.mode] || "音乐";
+  bar.querySelector("[data-player-volume]").value = Math.round(state.volume * 100);
+  bar.querySelector("[data-player-volume-value]").textContent = `${Math.round(state.volume * 100)}%`;
+  elAll("[data-audio-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.audioMode === state.mode)));
+  const shuffle = el("#musicShuffle"); if (shuffle) shuffle.checked = state.shuffle;
+  const launch = el("#audioPlayerLaunch");
+  if (launch) launch.dataset.playing = String(state.state === "playing");
+  if (musicPlaylistOpen) renderAudioPlaylist();
+}
+
+function renderAudioPlaylist() {
+  const box = el("#musicTrackList");
+  if (!box?.dataset) return;
+  const tracks = filteredAudioCatalog();
+  const mode = audioPlayer.snapshot().mode;
+  box.innerHTML = tracks.length ? tracks.map((track, index) => `<button type="button" class="music-track${audioPlayer.snapshot().track?.id === track.id ? " is-current" : ""}" data-audio-track="${esc(track.id)}">
+    <span class="music-track-index">${String(index + 1).padStart(2, "0")}</span>
+    <span class="music-track-copy"><strong>${esc(track.title)}</strong><small>${esc(track.artist || "未知演唱者")} · ${esc(track.workTitle)}</small></span>
+    <span class="music-track-bind">${esc(track.workTitle)}</span>
+  </button>`).join("") : `<p class="music-empty">${audioPlayer.catalog().length ? "没有匹配的歌曲" : "尚无已绑定音乐的作品"}</p>`;
+  box.dataset.mode = mode;
+  el("#musicCount").textContent = `${tracks.length} 首歌曲`;
+}
+
+function updateAudioQueue() {
+  renderAudioPlaylist();
+}
+
+function openAudioPlaylist() {
+  if (!modalIsOpen("#musicModal")) rememberOverlayFocus();
+  musicPlaylistOpen = true;
+  el("#musicShuffle").checked = audioPlayer.snapshot().shuffle;
+  setModalState("#musicModal", true);
+  elAll("[data-audio-mode]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.audioMode === audioPlayer.snapshot().mode));
+  });
+  renderAudioPlaylist();
+  focusAfterRender("#musicSearch");
+}
+
+function closeAudioPlaylist() {
+  if (!modalIsOpen("#musicModal")) return;
+  musicPlaylistOpen = false;
+  setModalState("#musicModal", false);
+  restoreOverlayFocus();
+}
+
+function navigateAudioTrack(track) {
+  if (!track?.workId) return toast("这首歌尚未绑定作品", true);
+  ensureImmersive();
+  if (immersiveView.isOpen()) immersiveView.playWork(track.workId);
+  else immersiveView.open([track.workId], track.workId, "fullscreen", "音乐播放列表");
 }
 
 /* 主档案损坏：挡住所有操作，只留「从备份恢复」和「新建空档案」两条路 */
@@ -480,6 +572,9 @@ function renderWall() {
   ArchiveV2.cards.bindWall(wall, { openWork: openDrawer, openSeries, openImmersive, openSeriesImmersive });
   el("#enterExhibit").disabled = !list.length;
   applyWallDensity();
+  requestAnimationFrame(() => {
+    if (wall.isConnected) applyWallDensity();
+  });
 }
 
 function openImmersive(id = null, surface = "overlay") {
@@ -623,6 +718,7 @@ function setAppView(view, scroll = true) {
     else button.removeAttribute("aria-current");
   });
   closeSidebar();
+  if (S.view === "archive") requestAnimationFrame(() => applyWallDensity());
   if (scroll) window.scrollTo({ top: 0, behavior: "auto" });
 }
 
@@ -680,22 +776,40 @@ async function saveHomeManager() {
   } finally { button.disabled = false; }
 }
 
+function syncSidebarToggle() {
+  const mobile = window.matchMedia("(max-width: 900px)").matches;
+  const expanded = mobile ? document.body.classList.contains("sidebar-open") : document.documentElement.dataset.sidebarCollapsed !== "true";
+  const label = expanded ? (mobile ? "关闭导航" : "收起导航") : "打开导航";
+  const button = el("#sidebarToggle");
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+function toggleSidebar() {
+  if (window.matchMedia("(max-width: 900px)").matches) {
+    if (document.body.classList.contains("sidebar-open")) closeSidebar();
+    else openSidebar();
+    return;
+  }
+  const collapsed = document.documentElement.dataset.sidebarCollapsed !== "true";
+  document.documentElement.dataset.sidebarCollapsed = String(collapsed);
+  try { localStorage.setItem("grdag_sidebar_collapsed", String(collapsed)); } catch (_) { /* 本次收起状态仍然生效。 */ }
+  syncSidebarToggle();
+  applyWallDensity();
+}
+
 function openSidebar() {
   document.body.classList.add("sidebar-open");
   el("#sidebarScrim").hidden = false;
-  el("#sidebarToggle").setAttribute("aria-expanded", "true");
-  el("#sidebarToggle").setAttribute("aria-label", "关闭导航");
-  el("#sidebarToggle").title = "关闭导航";
+  syncSidebarToggle();
   focusAfterRender("#navHome");
 }
 
 function closeSidebar() {
-  if (!document.body.classList.contains("sidebar-open")) return;
   document.body.classList.remove("sidebar-open");
   el("#sidebarScrim").hidden = true;
-  el("#sidebarToggle").setAttribute("aria-expanded", "false");
-  el("#sidebarToggle").setAttribute("aria-label", "打开导航");
-  el("#sidebarToggle").title = "打开导航";
+  syncSidebarToggle();
 }
 
 async function setHomeWorkHidden(id, shouldHide, button) {
@@ -1114,7 +1228,7 @@ function renderSeriesDrawer() {
       <div class="form-item"><label>系列类型</label><select id="sKind">${Object.entries(S.seriesKinds).map(([k, v]) => `<option value="${k}" ${s.kind === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
       <div class="form-item"><label>标签（逗号分隔）</label><input id="sTags" value="${esc((s.tags || []).join("，"))}"></div>
       <div class="form-item full"><label>代表图 URL（可留空，自动用成员封面）</label><input id="sCover" value="" placeholder="粘贴主视觉 / Logo 图片 URL"></div>
-      <div class="form-item full"><label for="sBackgrounds">系列沉浸背景链接（可选，每行一张，最多 20 张）</label><textarea id="sBackgrounds" rows="3" placeholder="https://… 横向系列大图">${esc((s.immersiveBackgroundUrls || (s.immersiveBackgroundUrl ? [s.immersiveBackgroundUrl] : [])).join("\n"))}</textarea><div class="tip">与全系列成员手动添加的大图共同轮播。留空也可使用成员背景；无大图时使用柔和背景和完整封面。</div></div>
+      ${ArchiveV2.backgroundEditor.form(s, 'sBackgrounds', '系列沉浸背景图片')}
       ${ArchiveV2.bgmEditor.form(s, 'seriesBgm')}
       <div class="form-item full"><label>系列简介</label><textarea id="sSummary" style="min-height:90px">${esc(s.summary || "")}</textarea></div>
       <div class="form-item full"><label>备注</label><input id="sNote" value="${esc(s.note || "")}"></div>
@@ -1128,6 +1242,7 @@ function renderSeriesDrawer() {
   ArchiveV2.bgmEditor.stop(body);
   body.innerHTML = html.join("");
   ArchiveV2.bgmEditor.bind(body, 'seriesBgm', toast);
+  ArchiveV2.backgroundEditor.bind(body, 'sBackgrounds', toast);
 
   el("#drawerClose").onclick = closeDrawer;
   el("#seriesEnterExhibit").onclick = () => openSeriesImmersive(s.id);
@@ -1173,15 +1288,15 @@ function renderSeriesDrawer() {
     renderDrawer();
   });
   el("#sSave").onclick = async () => {
-    let bgm;
-    try { bgm = await ArchiveV2.bgmEditor.read(body, 'seriesBgm'); } catch (error) { return toast(error.message, true); }
+    let bgm, backgrounds;
+    try { backgrounds = ArchiveV2.backgroundEditor.read(body, 'sBackgrounds'); bgm = await ArchiveV2.bgmEditor.read(body, 'seriesBgm'); } catch (error) { return toast(error.message, true); }
     const payload = {
       name: el("#sName").value.trim(), originalTitle: el("#sOrig").value.trim(),
       kind: el("#sKind").value, summary: el("#sSummary").value.trim(),
       tags: el("#sTags").value.split(/[，,]/).map(x => x.trim()).filter(Boolean),
       note: el("#sNote").value.trim(),
       bgm,
-      immersiveBackgroundUrls: el("#sBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+      immersiveBackgroundUrls: backgrounds,
     };
     const cov = el("#sCover").value.trim();
     if (cov) payload.cover = cov;
@@ -1215,7 +1330,7 @@ function modalIsOpen(selector) {
   return !!(m && m.classList.contains("show"));
 }
 function activeOverlayRoot() {
-  for (const sel of ["#addModal", "#seriesModal", "#settingsModal", "#hiddenWorksModal"]) {
+  for (const sel of ["#addModal", "#seriesModal", "#settingsModal", "#hiddenWorksModal", "#musicModal"]) {
     if (modalIsOpen(sel)) return el(`${sel} .modal-box`);
   }
   if (el("#drawer") && el("#drawer").classList.contains("show")) return el("#drawer");
@@ -1777,8 +1892,8 @@ async function importTmdbToCurrent(mode) {
 }
 
 async function saveTmdbCreate() {
-  let bgm;
-  try { bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
+  let bgm, backgrounds;
+  try { backgrounds = ArchiveV2.backgroundEditor.read(el('#addBody'), 'fImmersiveBackgrounds'); bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
   const a = S.add;
   const btn = el("#saveWork");
   const title = el("#fTitle").value.trim();
@@ -1797,7 +1912,7 @@ async function saveTmdbCreate() {
       year: el("#fYear").value.trim(),
       tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
       summary: el("#fSummary").value.trim(),
-      immersiveBackgroundUrls: el("#fImmersiveBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+      immersiveBackgroundUrls: backgrounds,
       bgm,
       creators,
     },
@@ -2010,7 +2125,7 @@ function renderForm() {
       <div class="form-item"><label>标签（逗号分隔）</label><input id="fTags" value="${esc((d.tags || []).join("，"))}"></div>
       <div class="form-item full"><label>创作者（角色：名字，句号分隔）</label><input id="fCreators" value="${esc((d.creators || []).map(c => c.role + "：" + c.name).join("；"))}"></div>
       <div class="form-section-title full"><span>沉浸体验</span><small>背景图与背景音乐只影响沉浸浏览</small></div>
-      <div class="form-item full"><label for="fImmersiveBackgrounds">沉浸背景图片链接（每行一张，最多 20 张）</label><textarea id="fImmersiveBackgrounds" rows="4" placeholder="https://… 横向图片更适合展厅">${esc((d.immersiveBackgroundUrls || (d.immersiveBackgroundUrl ? [d.immersiveBackgroundUrl] : [])).join("\n"))}</textarea><div class="tip">每行一张，调整行顺序即可调整顺序播放。全局播放方式和切换间隔在设置中调整。远程图片需联网显示。</div></div>
+      ${ArchiveV2.backgroundEditor.form(d, 'fImmersiveBackgrounds')}
       ${ArchiveV2.bgmEditor.form(d, 'workBgm')}
       <div class="form-section-title full"><span>内容与个人记录</span><small>简介和新建时的初始状态</small></div>
       <div class="form-item full"><label>简介</label><textarea id="fSummary" style="min-height:110px">${esc(d.summary || "")}</textarea></div>
@@ -2067,6 +2182,7 @@ function renderForm() {
   const cancelBtn = el("#addCancel"); if (cancelBtn) cancelBtn.onclick = closeAdd;
   const b2 = el("#addBack2"); if (b2) b2.onclick = () => { a.step = 2; renderAdd(); };
   ArchiveV2.bgmEditor.bind(body, 'workBgm', toast);
+  ArchiveV2.backgroundEditor.bind(body, 'fImmersiveBackgrounds', toast, urls => { d.immersiveBackgroundUrls = urls; });
   el("#saveWork").onclick = saveWork;
   if (a.mode === "edit") {
     elAll("[data-rfsrc]", body).forEach(x => x.onclick = () => {
@@ -2180,8 +2296,8 @@ async function applyRefill(draft) {
 }
 
 async function saveWork() {
-  let bgm;
-  try { bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
+  let bgm, backgrounds;
+  try { backgrounds = ArchiveV2.backgroundEditor.read(el('#addBody'), 'fImmersiveBackgrounds'); bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
   const a = S.add;
   const title = el("#fTitle").value.trim();
   if (!title) return toast("标题不能为空", true);
@@ -2196,7 +2312,7 @@ async function saveWork() {
     year: el("#fYear").value.trim(),
     tags: el("#fTags").value.split(/[，,]/).map(s => s.trim()).filter(Boolean),
     summary: el("#fSummary").value.trim(),
-    immersiveBackgroundUrls: el("#fImmersiveBackgrounds").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean),
+    immersiveBackgroundUrls: backgrounds,
     bgm,
     creators,
   });
@@ -2269,11 +2385,11 @@ function openSettings() {
     </div>
     <div class="section-head" style="margin-top:20px"><h3>沉浸背景</h3><div class="line"></div></div>
     <div class="option-line"><label class="opt-label" for="setBackgroundOrder">播放方式</label><select id="setBackgroundOrder" class="mini"><option value="ordered" ${st.immersive_background_order !== "random" ? "selected" : ""}>按作品行顺序</option><option value="random" ${st.immersive_background_order === "random" ? "selected" : ""}>随机切换</option></select></div>
-    <div class="form-item" style="margin-bottom:14px"><label for="setBackgroundInterval">切换间隔（秒）</label><input id="setBackgroundInterval" type="number" min="5" max="300" step="1" value="${esc(st.immersive_background_interval || 12)}"><div class="tip">全局生效，范围 5 到 300 秒。</div></div>
+    <div class="form-item" style="margin-bottom:14px"><label for="setBackgroundInterval">切换间隔（秒）</label><input id="setBackgroundInterval" type="number" min="3" max="300" step="1" value="${esc(Math.max(3, Number(st.immersive_background_interval) || 12))}"><div class="tip">全局生效，范围 3 到 300 秒。</div></div>
     <div class="section-head" style="margin-top:20px"><h3>导出与恢复</h3><div class="line"></div></div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn" id="expJson">导出 JSON</button>
-      <button class="btn" id="expZip">导出含封面 zip</button>
+      <button class="btn" id="expZip">导出完整 ZIP（封面 / 背景 / 音乐）</button>
       <label class="btn" style="cursor:pointer">导入备份<input type="file" id="impFile" accept=".json,.zip,application/json,application/zip" style="display:none"></label>
       <select class="mini" id="impMode"><option value="merge">合并</option><option value="replace">覆盖</option></select>
     </div>
@@ -2414,13 +2530,59 @@ function bindGlobal() {
   elAll("#timeSelect").forEach(s => s.onchange = (e) => { S.filters.time = e.target.value; renderWall(); });
   el("#addBtn").onclick = openAdd;
   el("#menuBtn").onclick = openSettings;
+  el("#musicOpenBtn").onclick = openAudioPlaylist;
+  document.addEventListener("archive-music-open", openAudioPlaylist);
+  el("#audioPlayerLaunch").onclick = openAudioPlaylist;
+  el("#audioPlayer").addEventListener("click", event => {
+    const action = event.target.closest("[data-player-action]")?.dataset.playerAction;
+    if (action === "open") openAudioPlaylist();
+    else if (action === "toggle") audioPlayer.play();
+    else if (action === "next") audioPlayer.next();
+    else if (action === "previous") audioPlayer.previous();
+  });
+  el("#audioPlayer").querySelector("[data-player-volume]").oninput = event => audioPlayer.setVolume(Number(event.target.value) / 100);
+  el("#musicClose").onclick = closeAudioPlaylist;
+  el("#musicCancel").onclick = closeAudioPlaylist;
+  el("#musicModal").onclick = event => { if (event.target.id === "musicModal") closeAudioPlaylist(); };
+  elAll("[data-audio-mode]").forEach(button => button.onclick = () => {
+    audioPlayer.setMode(button.dataset.audioMode);
+    if (button.dataset.audioMode !== "immersive") audioPlayer.setQueue(filteredAudioCatalog());
+    elAll("[data-audio-mode]").forEach(item => item.setAttribute("aria-pressed", String(item === button)));
+    renderAudioPlaylist();
+  });
+  el("#musicSearch").oninput = event => { musicSearch = event.target.value; updateAudioQueue(); };
+  el("#musicCategory").onchange = event => { musicCategory = event.target.value; updateAudioQueue(); };
+  el("#musicShuffle").onchange = event => audioPlayer.setShuffle(event.target.checked);
+  el("#musicStart").onclick = () => {
+    const tracks = filteredAudioCatalog();
+    if (!tracks.length) return toast("没有可播放的歌曲", true);
+    audioPlayer.setQueue(tracks);
+    if (audioPlayer.snapshot().mode === "immersive") audioPlayer.setMode("global");
+    audioPlayer.play();
+  };
+  el("#musicTrackList").onclick = event => {
+    const track = event.target.closest("[data-audio-track]");
+    if (!track) return;
+    audioPlayer.setQueue(filteredAudioCatalog());
+    audioPlayer.playTrack(track.dataset.audioTrack);
+    renderAudioPlaylist();
+  };
+  el("#musicTrackList").onkeydown = event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const track = event.target.closest("[data-audio-track]");
+    if (!track) return;
+    event.preventDefault();
+    audioPlayer.setQueue(filteredAudioCatalog());
+    audioPlayer.playTrack(track.dataset.audioTrack);
+  };
   el("#undoBtn").onclick = doUndo;
   el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
   el("#navHome").onclick = () => setAppView("home");
   el("#navArchive").onclick = () => setAppView("archive");
   el("#navImmersive").onclick = () => { closeSidebar(); openImmersive(null, "fullscreen"); };
-  el("#sidebarToggle").onclick = () => document.body.classList.contains("sidebar-open") ? closeSidebar() : openSidebar();
+  el("#sidebarToggle").onclick = toggleSidebar;
+  window.matchMedia("(max-width: 900px)").addEventListener("change", closeSidebar);
   el("#sidebarScrim").onclick = closeSidebar;
   el("#homeView").onclick = handleHomeAction;
   el("#hiddenWorksClose").onclick = closeHomeManager;
@@ -2449,7 +2611,7 @@ function bindGlobal() {
   el("#saveSettings").onclick = async () => {
     const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30,
       immersive_background_order: el("#setBackgroundOrder").value,
-      immersive_background_interval: Number(el("#setBackgroundInterval").value) || 12 };
+      immersive_background_interval: Math.max(3, Math.min(300, Number(el("#setBackgroundInterval").value) || 12)) };
     const r = await api("/api/settings", { method: "POST", body });
     if (!r.ok) return toast("保存失败", true);
     S.settings = r.settings; toast("设置已保存"); closeSettings();
@@ -2473,6 +2635,7 @@ function bindGlobal() {
       else if (el("#seriesModal").classList.contains("show")) closeSeriesModal();
       else if (el("#settingsModal").classList.contains("show")) closeSettings();
       else if (el("#hiddenWorksModal").classList.contains("show")) closeHomeManager();
+      else if (el("#musicModal").classList.contains("show")) closeAudioPlaylist();
       else if (S.currentId || S.currentSeriesId) closeDrawer();
       else if (immersiveView?.isOpen()) immersiveView.close();
       else if (document.body.classList.contains("sidebar-open")) closeSidebar();

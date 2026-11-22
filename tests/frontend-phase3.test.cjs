@@ -71,6 +71,13 @@ test('multiple backgrounds follow saved order, wrap, honor interval, and stop on
   assert.equal(h.displayed.length, 5);
   h.loader.cancel(); assert.equal(h.timers.size, 0);
 });
+test('background switching respects the new three-second minimum', () => {
+  const h = backgroundHarness();
+  h.loader.load({immersiveBackgroundUrls:['https://example.com/a','https://example.com/b']}, h.display, {immersive_background_interval:1});
+  h.images[0].onload();
+  assert.equal([...h.timers.values()].some(timer => timer.ms === 3000), true);
+  h.loader.cancel();
+});
 
 test('failed slideshow images are skipped while the last visible image stays in place', () => {
   const h = backgroundHarness();

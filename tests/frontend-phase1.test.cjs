@@ -16,14 +16,16 @@ function app(fetch) {
     return elements.get(selector);
   };
   const context = vm.createContext({
-    fetch, AbortController, setTimeout, clearTimeout,
+    fetch, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
     getComputedStyle: () => ({gridTemplateColumns:"150px 150px"}),
     localStorage: { getItem: () => null },
+    requestAnimationFrame: callback => callback(),
     window: { addEventListener() {} },
-    document: { querySelector: element, querySelectorAll: () => [] },
+    document: { querySelector: element, querySelectorAll: () => [], addEventListener() {} },
   });
   vm.runInContext(fs.readFileSync(path.join(root, 'web/presentation-core.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'web/exhibit-cards.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'web/immersive-audio.js'), 'utf8'), context);
   const source = fs.readFileSync(path.join(root, 'web/app.js'), 'utf8');
   vm.runInContext(source.replace(/applyAppearance\(false\);\s*boot\(\);\s*$/, ''), context);
   vm.runInContext('renderTabs=()=>{};renderStatusChips=()=>{};renderStats=()=>{};', context);
