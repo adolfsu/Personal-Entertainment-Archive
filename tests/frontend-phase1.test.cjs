@@ -118,6 +118,14 @@ test('an empty library can show empty series, but active filters do not leak the
   assert.doesNotMatch(a.elements.get('#wall').innerHTML, /data-sid="empty"/);
 });
 
+test('non-home work entry opens immersive browsing while home keeps the drawer', () => {
+  const a = app(async () => response({}));
+  a.run('S.works=[{id:"w",title:"作品",category:"book"}];let opened=[];openDrawer=id=>opened.push("drawer:"+id);ensureImmersive=()=>{immersiveView={isOpen:()=>false,open:(ids,id,surface,source)=>opened.push(`immersive:${id}:${surface}:${source}`)}}');
+  a.run('S.view="home";openCurrentWork("w")');
+  a.run('S.view="archive";openCurrentWork("w")');
+  assert.deepEqual(Array.from(a.run('opened')), ['drawer:w','immersive:w:fullscreen:全部作品']);
+});
+
 test('all persisted entity mutation routes share the update entry', () => {
   const a = app(async () => response({}));
   for (const route of ['/api/works/w/refill','/api/series/s/members','/api/tmdb/import',

@@ -57,7 +57,7 @@
         <div class="exhibit-progress-label">${total ? `全系列已完成 ${completed} / ${total}` : "暂无成员，进入详情添加"}</div>
         <div class="exhibit-progress" aria-hidden="true"><span style="width:${percent}%"></span></div>
         <div class="exhibit-series-average">${average !== null ? `成员均分 ${average}` : "成员尚未评分"}</div>
-        <button type="button" class="exhibit-series-launch" data-series-immersive="${escape(series.id)}" aria-label="沉浸浏览系列《${escape(series.name)}》">沉浸浏览 ↗</button>
+        <button type="button" class="exhibit-series-launch" data-series-immersive="${escape(series.id)}" aria-label="浏览系列《${escape(series.name)}》">浏览系列 ↗</button>
       </div>
     </article>`;
   }

@@ -35,11 +35,8 @@ try{
     <button class="sidebar-nav-item" id="navHome" data-app-nav="home" aria-current="page" title="首页">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg><span>首页</span>
     </button>
-    <button class="sidebar-nav-item" id="navArchive" data-app-nav="archive" title="展厅">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="9" rx="1"/><rect x="14" y="4" width="7" height="6" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/><rect x="3" y="16" width="7" height="4" rx="1"/></svg><span>展厅</span>
-    </button>
-    <button class="sidebar-nav-item" id="navImmersive" title="沉浸浏览">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4"/><circle cx="9" cy="8" r="1"/></svg><span>沉浸浏览</span>
+    <button class="sidebar-nav-item" id="navArchive" data-app-nav="archive" title="作品库">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="9" rx="1"/><rect x="14" y="4" width="7" height="6" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/><rect x="3" y="16" width="7" height="4" rx="1"/></svg><span>作品库</span>
     </button>
     <button class="sidebar-nav-item" id="musicOpenBtn" title="音乐列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span>音乐列表</span></button>
   </nav>
@@ -96,7 +93,7 @@ try{
 </section>
 
 <section class="archive-view" id="archiveView" aria-labelledby="archiveTitle">
-<h1 id="archiveTitle" class="sr-only">作品展厅</h1>
+<h1 id="archiveTitle" class="sr-only">作品库</h1>
 <div class="filters">
   <div class="tabs" id="tabs"></div>
   <div class="filters-right">
@@ -132,7 +129,7 @@ try{
     <button data-size="medium">中</button>
     <button data-size="large">大</button>
   </div>
-  <button class="btn btn-sm" id="enterExhibit">进入展厅 ↗</button>
+  <button class="btn btn-sm" id="enterExhibit">沉浸浏览当前结果 ↗</button>
   <button class="btn btn-sm" id="newSeriesBtn">＋ 新建系列</button>
 </div>
 

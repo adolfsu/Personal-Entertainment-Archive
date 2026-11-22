@@ -569,7 +569,11 @@ function renderWall() {
         category: catLabel(item.entity.category), status: statusLabel(item.entity), series: seriesNameOf(item.entity),
       })).join("");
   }
-  ArchiveV2.cards.bindWall(wall, { openWork: openDrawer, openSeries, openImmersive, openSeriesImmersive });
+  ArchiveV2.cards.bindWall(wall, {
+    openWork: openCurrentWork,
+    openSeries: openCurrentSeries,
+    openImmersive, openSeriesImmersive,
+  });
   el("#enterExhibit").disabled = !list.length;
   applyWallDensity();
   requestAnimationFrame(() => {
@@ -592,15 +596,17 @@ function openSeriesImmersive(id, surface = "overlay") {
   if (el("#drawer").classList.contains("show")) closeDrawer({skipImmersive:true});
   ensureImmersive();
   const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
-  immersiveView.openSeries(id, surface, filtered ? visibleWorks().map(work => work.id) : null);
+  immersiveView.openSeries(id, surface, S.view === "home" ? null : (filtered ? visibleWorks().map(work => work.id) : null));
 }
 
 function ensureImmersive() {
   if (!immersiveView) {
     immersiveView = ArchiveV2.immersive.create({
       root: el("#immersiveRoot"), getWork: findWork, getWorks: () => S.works,
-      getSeries: seriesById, openSeriesDetails: openSeries,
+      getSeries: seriesById, getSeriesLinks: work => (work.seriesLinks || []).map(link => ({id:link.id,name:seriesById(link.id)?.name || "（系列已删除）",role:S.seriesRoles[link.role] || link.role})),
+      openEdit: openImmersiveEdit, openSeriesDetails: openSeriesImmersive,
       getBackgroundSettings: () => S.settings || {},
+      onOpenSeries: id => immersiveView?.enterRelatedSeries(id),
       notify: toast,
       getLabels: work => ({ category: catLabel(work.category), status: statusLabel(work), series: seriesNameOf(work),
         recordStatus: status => ((S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS)[status] || status }),
@@ -711,7 +717,7 @@ function setAppView(view, scroll = true) {
   if (home) home.hidden = S.view !== "home";
   if (archive) archive.hidden = S.view !== "archive";
   document.documentElement.dataset.homeSnap = String(S.view === "home");
-  el("#topbarContext").textContent = S.view === "home" ? "正在进行" : "作品展厅";
+  el("#topbarContext").textContent = S.view === "home" ? "正在进行" : "作品库";
   elAll("[data-app-nav]").forEach(button => {
     const current = button.dataset.appNav === S.view;
     if (current) button.setAttribute("aria-current", "page");
@@ -830,11 +836,28 @@ function handleHomeAction(event) {
   if (!button) return;
   const action = button.dataset.homeAction, id = button.dataset.homeId;
   if (action === "immersive") openHomeImmersive(id);
-  else if (action === "details" && id) openDrawer(id);
+  else if (action === "details" && id) openCurrentWork(id);
   else if (action === "hide" && id) setHomeWorkHidden(id, true, button);
   else if (action === "manage") openHomeManager();
   else if (action === "archive") setAppView("archive");
   else if (action === "add") openAdd();
+}
+
+function openCurrentWork(id) {
+  if (!findWork(id)) return;
+  if (S.view === "home") openDrawer(id);
+  else {
+    ensureImmersive();
+    const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+    if (immersiveView.isOpen()) immersiveView.playWork(id);
+    else immersiveView.open(visibleWorks().map(work => work.id), id, "fullscreen", filtered ? "当前筛选结果" : "全部作品");
+  }
+}
+
+function openCurrentSeries(id) {
+  if (!seriesById(id)) return;
+  if (S.view === "home") openSeries(id);
+  else openSeriesImmersive(id, "fullscreen");
 }
 
 /* ------------------------------------------------------------ 详情抽屉 */
@@ -1257,10 +1280,10 @@ function renderSeriesDrawer() {
   elAll(".member-row", body).forEach(row => {
     row.onclick = (ev) => {
       if (ev.target.closest("[data-msdel]")) return;
-      openDrawer(row.dataset.wid);
+      openCurrentWork(row.dataset.wid);
     };
     row.onkeydown = (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDrawer(row.dataset.wid); }
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openCurrentWork(row.dataset.wid); }
     };
   });
   elAll("[data-msdel]", body).forEach(b => b.onclick = async (ev) => {
@@ -1352,7 +1375,7 @@ function openSeriesModal(opts = {}) {
       <div class="form-item full"><label>系列简介（只写系列是什么，不写单部剧情）</label><textarea id="nsSummary" style="min-height:90px"></textarea></div>
       <div class="form-item full"><label>代表图 URL（可留空）</label><input id="nsCover" placeholder="主视觉 / Logo 图片地址"></div>
     </div>
-    <div class="tip">成员是手动添加的：创建后到系列页「添加成员」里挑作品，或在作品详情页「所属系列」里归入。</div>`;
+    <div class="tip">成员是手动添加的：创建后到系列集合页添加成员，或编辑作品时调整所属系列。</div>`;
   el("#seriesSave").textContent = "创建系列";
   setModalState("#seriesModal", true);
   setTimeout(() => { const n = el("#nsName"); if (n) n.focus(); }, 30);
@@ -1375,7 +1398,7 @@ async function saveSeriesDraft() {
   }
   setModalState("#seriesModal", false);
 
-  openSeries(r.series.id, true);
+  openCurrentSeries(r.series.id);
   toast("系列已创建");
 }
 
@@ -1933,7 +1956,7 @@ async function saveTmdbCreate() {
   toast(r.action === "updated"
     ? (a.tmdbMode === "overwrite" ? "已覆盖已有 TMDB 作品，评分、经历、系列和用户字段已保留" : "已更新相同 TMDB 条目，已有非空资料未覆盖")
     : "已入库");
-  openDrawer(r.work.id);
+  openCurrentWork(r.work.id);
 }
 
 /* ------------------------------------------------------------ 新增 / 编辑 */
@@ -1949,11 +1972,26 @@ function closeAdd() {
   ArchiveV2.bgmEditor.stop(el('#addBody'));
   restoreOverlayFocus();
   setModalState("#addModal", false);
+  el("#addModal").classList.remove("is-editing");
+  if (S.add.returnToImmersive) {
+    const scroll = S.add.returnToImmersive.scrollTop;
+    requestAnimationFrame(() => { if (!S.add.saving) immersiveView?.editReturned(scroll); });
+  }
 }
 
 function openEdit(w) {
+  openEditWithReturn(w, null);
+}
+
+function openImmersiveEdit(work, scrollTop) {
+  openEditWithReturn(work, {scrollTop});
+}
+
+function openEditWithReturn(w, returnToImmersive) {
   if (!modalIsOpen("#addModal")) rememberOverlayFocus();
+  el("#addModal").classList.add("is-editing");
   S.add = { step: 3, category: w.category, source: (w.source || {}).name || null, items: [], draft: JSON.parse(JSON.stringify(w)), mode: "edit", editId: w.id, busy: false, refItems: [], refSource: (w.source || {}).name || null, tmdbRaw: "", tmdbPreview: null, tmdbMode: "merge", youshuRaw: "", youshuPreview: null, youshuApplied: null };
+  S.add.returnToImmersive = returnToImmersive;
   setModalState("#addModal", true);
   renderAdd();
   focusAfterRender("#fTitle");
@@ -2170,7 +2208,7 @@ function renderForm() {
       <div class="results" id="rfResults"></div>
     </div>` : ""}
     ${gaps.length ? `<div class="tip">这个分类的常见字段还缺：<div class="gap-list">${gaps.map(g => `<span class="gap-chip">${esc(g)}</span>`).join("")}</div>保存后可点「编辑信息」或用「我的字段」补上，不影响使用。</div>` : ""}
-    ${(d.infobox || []).length ? `<div class="tip">已抓到 ${d.infobox.length} 项来源字段，会在详情页的「来源详情」里展示。</div>` : ""}`;
+    ${(d.infobox || []).length ? `<div class="tip">已抓到 ${d.infobox.length} 项来源字段，会在沉浸详情的「来源详情」里展示。</div>` : ""}`;
 
   if (a.mode === "create") {
     const rg = el("#fRating");
@@ -2336,7 +2374,13 @@ async function saveWork() {
     }
     const r = await api(`/api/works/${a.editId}`, { method: "PATCH", body: payload });
     if (!r.ok) return toast(r.error || "保存失败", true);
-    closeAdd(); renderDrawer(); renderWall(); toast("已保存");
+    const immersiveReturn = S.add.returnToImmersive;
+    if (immersiveReturn) S.add.saving = true;
+    closeAdd();
+    if (!immersiveReturn) renderDrawer();
+    renderWall();
+    if (immersiveReturn) requestAnimationFrame(() => immersiveView?.editReturned(immersiveReturn.scrollTop));
+    toast("已保存");
     return;
   }
   if (a.tmdbRaw) return saveTmdbCreate();
@@ -2354,7 +2398,7 @@ async function saveWork() {
   if (!r.ok) return toast(r.error || "保存失败", true);
 
   closeAdd(); renderTabs(); renderWall(); renderStats(); toast("已入库");
-  openDrawer(r.work.id);
+  openCurrentWork(r.work.id);
 }
 
 /* ------------------------------------------------------------ 设置 / 备份 */
@@ -2580,7 +2624,6 @@ function bindGlobal() {
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
   el("#navHome").onclick = () => setAppView("home");
   el("#navArchive").onclick = () => setAppView("archive");
-  el("#navImmersive").onclick = () => { closeSidebar(); openImmersive(null, "fullscreen"); };
   el("#sidebarToggle").onclick = toggleSidebar;
   window.matchMedia("(max-width: 900px)").addEventListener("change", closeSidebar);
   el("#sidebarScrim").onclick = closeSidebar;

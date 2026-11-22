@@ -1,4 +1,4 @@
-/* 单作品沉浸展示：容器、导航与历史；写入始终交给原有完整详情。 */
+/* 统一作品浏览：沉浸视图承载完整详情，编辑与档案写入由应用层管理。 */
 (() => {
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
   const progressKeys = /^(进度|阅读进度|观看进度|游玩进度|当前进度|当前集数|当前章节|完成进度|已读章节|已看集数)$/;
@@ -30,7 +30,35 @@
     </div>`;
   }
 
-  function create({ root, getWork, getWorks, getSeries = () => null, getLabels, getBackgroundSettings = () => ({}), openDetails, openSeriesDetails, closeDetails, captureOrigin, restoreOrigin, mainRoots, notify = () => {} }) {
+  function completeWorkContent(work, labels, seriesLinks = []) {
+    const creators = work.creators || [];
+    const experiences = (work.experiences || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+    const fields = [["年份", work.year], ["状态", labels.status], ["收藏于", (work.createdAt || "").replace("T", " ").slice(0, 16)],
+      ["最近经历", work.lastExperienceAt], ["来源", work.source?.label || work.source?.name],
+      ["来源评分", work.ratingRef == null ? "" : `${Number(work.ratingRef).toFixed(1)}${work.ratingMeta?.total ? ` · ${work.ratingMeta.total} 人` : ""}`]]
+      .filter(([, value]) => value != null && value !== "");
+    const tags = (work.tags || []).filter(Boolean), infobox = (work.infobox || []).filter(item => item?.key && item?.value != null);
+    const userFields = (work.userFields || []).filter(item => item?.key && item?.value != null), history = work.ratingHistory || [];
+    const info = rows => rows.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join("");
+    const sourceUrl = /^https?:\/\//i.test(work.source?.url || "") ? work.source.url : "";
+    return `<div class="im-art"><div class="im-poster"><div class="im-poster-empty"><span>${esc(labels.category)}</span><small>暂无封面</small></div>${work.coverUrl ? `<img src="${esc(work.coverUrl)}" alt="《${esc(work.title)}》封面" decoding="async" data-im-poster>` : ""}</div>${labels.series ? `<p class="im-series-caption"><span>所属系列</span>${esc(labels.series)}</p>` : ""}</div>
+      <div class="im-copy"><p class="im-eyebrow">个人典藏 <span>／</span> ${esc([labels.category, work.year].filter(Boolean).join(" · "))}</p>
+        <h1 id="immersiveTitle" class="im-title">${esc(work.title)}</h1>${work.originalTitle && work.originalTitle !== work.title ? `<p class="im-original">${esc(work.originalTitle)}</p>` : ""}
+        ${creators.length ? `<div class="im-creators">${creators.map(person => `<span>${esc(person.role)} ${esc(person.name)}</span>`).join("<i>·</i>")}</div>` : ""}
+        <div class="im-personal"><div class="im-score"><span>个人评分</span><strong>${work.rating == null ? "未评分" : Number(work.rating).toFixed(1)}</strong>${work.rating == null ? "" : "<small>/ 10</small>"}</div><span class="im-status" data-status="${esc(work.status)}">${esc(labels.status)}</span></div>
+        ${tags.length ? `<div class="im-tags">${tags.map(tag => `<span>${esc(tag)}</span>`).join("")}</div>` : ""}
+        ${sourceUrl ? `<a class="im-source-link" href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(work.source.label || work.source.name || "来源条目")} ↗</a>` : ""}
+        <section class="im-section"><h2>作品简介</h2><div class="im-synopsis">${esc(work.summary || "暂未填写作品简介。")}</div></section>
+        <section class="im-section"><h2>作品资料</h2><dl class="im-info-grid">${info(fields) || "<p class='im-muted'>暂无补充资料。</p>"}</dl></section>
+        ${infobox.length ? `<section class="im-section"><h2>来源详情 <small>${infobox.length} 项</small></h2><dl class="im-info-grid">${info(infobox.map(item => [item.key, item.value]))}</dl></section>` : ""}
+        ${seriesLinks.length ? `<section class="im-section"><h2>所属系列</h2><div class="im-series-links">${seriesLinks.map(link => `<button type="button" data-im-action="series" data-im-series="${esc(link.id)}">${esc(link.name)}<small>${esc(link.role || "")}</small></button>`).join("")}</div></section>` : ""}
+        <section class="im-section im-records"><h2>我的经历 <small>${experiences.length}</small></h2>${experiences.length ? experiences.map(record => `<div class="im-record"><div class="im-record-meta"><time>${esc(record.date)}</time><span>${esc(labels.recordStatus(record.status))}</span>${record.id === work.currentExperienceId ? "<span>当前状态</span>" : ""}</div><p>${esc(record.content || "已记录此状态")}</p></div>`).join("") : "<p class='im-muted'>还没有经历记录。</p>"}</section>
+        ${userFields.length ? `<section class="im-section"><h2>我的字段</h2><dl class="im-info-grid">${info(userFields.map(field => [field.key, field.value]))}</dl></section>` : ""}
+        ${history.length ? `<section class="im-section"><h2>评分记录</h2><div class="im-rating-history">${history.slice().reverse().map(entry => `<div><time>${esc((entry.at || "").replace("T", " ").slice(0, 16))}</time><strong>${Number(entry.score).toFixed(1)}</strong><span>${esc(entry.reason || "")}</span></div>`).join("")}</div></section>` : ""}
+      </div>`;
+  }
+
+  function create({ root, getWork, getWorks, getSeries = () => null, getLabels, getSeriesLinks = () => [], getBackgroundSettings = () => ({}), openEdit = () => {}, onOpenSeries = () => {}, openDetails, openSeriesDetails, closeDetails, captureOrigin, restoreOrigin, mainRoots, notify = () => {} }) {
     const loader = ArchiveV2.backgrounds.createLoader();
     const seriesBackgrounds = ArchiveV2.seriesImmersive.createBackgrounds();
     const music = ArchiveV2.audioPlayer;
@@ -127,8 +155,8 @@
       if (session.category !== "all" && !works.some(work => work.category === session.category)) session.category = "all";
       root.dataset.view = "series";
       root.innerHTML = `<div class="im-window"><div class="im-scene" aria-hidden="true"></div><div class="im-shade" aria-hidden="true"></div>
-        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">← 返回陈列</button></div><div class="im-location"><span>系列展厅</span><strong>${works.length} 件典藏</strong></div>${viewControls()}</header>
-        <div class="im-scroll ims-scroll">${ArchiveV2.seriesImmersive.content(series, works, getLabels, session)}</div><button type="button" class="im-details-corner" data-im-action="details" aria-label="查看系列完整详情">系列详情 ↗</button></div>`;
+        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">← 返回作品库</button></div><div class="im-location"><span>系列典藏</span><strong>${works.length} 件作品</strong></div>${viewControls()}</header>
+        <div class="im-scroll ims-scroll">${ArchiveV2.seriesImmersive.content(series, works, getLabels, session)}</div></div>`;
       bindPosters();
       mountMusic();
       const scene = root.querySelector(".im-scene");
@@ -171,12 +199,11 @@
       root.hidden = false;
       root.innerHTML = `<div class="im-window">
         <div class="im-scene" aria-hidden="true" data-background="default"></div><div class="im-shade" aria-hidden="true"></div>
-        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">${session.seriesId ? `← 返回系列<span class="im-return-name"> · ${esc(source)}</span>` : "← 返回陈列"}</button><button type="button" class="im-catalog-toggle" data-im-action="catalog" aria-expanded="false" aria-controls="imCatalog">☷ <span>作品目录</span></button></div>
+        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">${session.seriesId ? `← 返回系列<span class="im-return-name"> · ${esc(source)}</span>` : "← 返回作品库"}</button><button type="button" class="im-catalog-toggle" data-im-action="catalog" aria-expanded="false" aria-controls="imCatalog">☷ <span>作品目录</span></button></div>
           <div class="im-location" aria-live="polite"><span>${esc(source)}</span><strong>${index + 1} <i>/</i> ${session.ids.length}</strong></div>
-          ${viewControls()}</header>
-        <div class="im-scroll"><article class="im-card">${workContent(work, labels)}</article></div>
+          <div class="im-toolbar-controls"><button type="button" class="im-button im-edit" data-im-action="edit" aria-label="编辑作品" title="编辑作品">编辑</button>${viewControls()}</div></header>
+        <div class="im-scroll"><article class="im-card">${completeWorkContent(work, labels, getSeriesLinks(work))}</article></div>
         <button type="button" class="im-side-arrow im-side-prev" data-im-action="previous" ${previous ? "" : "disabled"} aria-label="前一件">‹</button><button type="button" class="im-side-arrow im-side-next" data-im-action="next" ${next ? "" : "disabled"} aria-label="后一件">›</button>
-        <button type="button" class="im-details-corner" data-im-action="details" aria-label="查看完整详情">详情 ↗</button>
         <aside id="imCatalog" class="im-catalog" hidden><div class="im-catalog-head"><strong>作品目录</strong><button type="button" data-im-action="catalog-close" aria-label="关闭目录">×</button></div><input type="search" data-im-catalog-search placeholder="搜索作品" aria-label="搜索作品"><div class="im-catalog-list"></div></aside>
       </div>`;
       bindPosters();
@@ -236,7 +263,18 @@
       else if (action === "music") document.dispatchEvent(new Event('archive-music-open'));
       else if (action === "previous") navigate(-1);
       else if (action === "next") navigate(1);
-      else if (action === "details") showDetails();
+      else if (action === "edit") {
+        const work = getWork(session?.currentId);
+        if (work) {
+          const scroll = root.querySelector(".im-scroll")?.scrollTop || 0;
+          session.editing = true; session.editScroll = scroll; root.hidden = true;
+          openEdit(work, scroll);
+        }
+      }
+      else if (action === "series") {
+        const id = event.target.closest("[data-im-series]")?.dataset.imSeries;
+        if (id) onOpenSeries(id);
+      }
       else if (action === "member") enterMember(event.target.closest("[data-im-member]").dataset.imMember);
       else if (action === "category") {
         session.category = event.target.closest("[data-im-category]").dataset.imCategory;
@@ -342,6 +380,34 @@
           token:`${Date.now()}-${Math.random().toString(36).slice(2)}`};
         origin = captureOrigin(seriesId); detail = false; lock(); render(); writeHistory(true);
       },
+      editReturned(scroll = 0) {
+        if (!session || !getWork(session.currentId)) return false;
+        session.editing = false;
+        detail = false;
+        render("edit");
+        const scroller = root.querySelector(".im-scroll");
+        if (scroller) scroller.scrollTop = scroll;
+        writeHistory();
+        return true;
+      },
+      suspendForEdit(scroll = 0) {
+        if (!session || session.page !== "work") return false;
+        session.editing = true;
+        session.editScroll = scroll;
+        root.hidden = true;
+        return true;
+      },
+      enterRelatedSeries(id) {
+        if (!session || !getSeries(id) || transitionPending) return false;
+        const series = getSeries(id);
+        session = {seriesId:id,page:"series",currentId:null,ids:[],surface:"fullscreen",category:"all",query:"",matchedIds:null,token:session.token};
+        detail = false; render("catalog"); writeHistory(); return true;
+      },
+      ensureOpen() {
+        if (!session) return false;
+        if (detail) { detail = false; render("details"); writeHistory(); }
+        return true;
+      },
       close, returnFromDetails,
       playWork(id) {
         const work = getWork(id);
@@ -357,6 +423,7 @@
       overlayRoot: () => session && !detail ? root : null,
       refresh() {
         if (!session) return;
+        if (session.editing) return;
         if (!reconcile()) { close(); return; }
         if (!detail) {
           if (session.page === "series") rememberSeries();
@@ -367,5 +434,5 @@
       },
     };
   }
-  globalThis.ArchiveV2 = Object.assign(globalThis.ArchiveV2 || {}, { immersive: { create, workContent } });
+  globalThis.ArchiveV2 = Object.assign(globalThis.ArchiveV2 || {}, { immersive: { create, workContent, completeWorkContent } });
 })();

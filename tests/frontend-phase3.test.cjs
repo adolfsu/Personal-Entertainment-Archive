@@ -46,6 +46,20 @@ test('immersive content escapes user fields and limits recent records', () => {
   assert.doesNotMatch(html, /<script/i);
 });
 
+test('complete immersive content includes archive fields, series links, and escapes values', () => {
+  const {immersive} = load(['immersive.js']);
+  const html = immersive.completeWorkContent({
+    id:'work',title:'<作品>',originalTitle:'Original',category:'book',status:'active',year:2025,rating:8.5,
+    summary:'<简介>',tags:['<标签>'],source:{label:'来源',url:'https://example.com/item'},
+    infobox:[{key:'作者',value:'<作者>'}],userFields:[{key:'进度',value:'12章'}],
+    experiences:[{id:'e',date:'2026-01-01',status:'active',content:'<记录>'}],
+    ratingHistory:[{at:'2026-01-01T12:00:00',score:8.5,reason:'<原因>'}],
+  },{category:'出版书',status:'在读',recordStatus:()=> '在读'},[{id:'s',name:'系列',role:'正传'}]);
+  for(const value of ['&lt;作品&gt;','&lt;简介&gt;','&lt;标签&gt;','&lt;作者&gt;','&lt;记录&gt;','&lt;原因&gt;','系列','来源']) assert.match(html,new RegExp(value));
+  assert.match(html,/data-im-series="s"/);
+  assert.doesNotMatch(html,/<script/i);
+});
+
 function backgroundHarness() {
   const {backgrounds} = load(['immersive-background.js']);
   const images = [], displayed = [], timers = new Map();
