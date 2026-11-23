@@ -39,6 +39,7 @@
       .filter(([, value]) => value != null && value !== "");
     const tags = (work.tags || []).filter(Boolean), infobox = (work.infobox || []).filter(item => item?.key && item?.value != null);
     const userFields = (work.userFields || []).filter(item => item?.key && item?.value != null), history = work.ratingHistory || [];
+    const statusOptions = Object.entries(labels.statusOptions || {}).filter(([key]) => key !== "not_started");
     const info = rows => rows.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join("");
     const sourceUrl = /^https?:\/\//i.test(work.source?.url || "") ? work.source.url : "";
     return `<div class="im-art"><div class="im-poster"><div class="im-poster-empty"><span>${esc(labels.category)}</span><small>暂无封面</small></div>${work.coverUrl ? `<img src="${esc(work.coverUrl)}" alt="《${esc(work.title)}》封面" decoding="async" data-im-poster>` : ""}</div>${labels.series ? `<p class="im-series-caption"><span>所属系列</span>${esc(labels.series)}</p>` : ""}</div>
@@ -52,20 +53,31 @@
         <section class="im-section"><h2>作品资料</h2><dl class="im-info-grid">${info(fields) || "<p class='im-muted'>暂无补充资料。</p>"}</dl></section>
         ${infobox.length ? `<section class="im-section"><h2>来源详情 <small>${infobox.length} 项</small></h2><dl class="im-info-grid">${info(infobox.map(item => [item.key, item.value]))}</dl></section>` : ""}
         ${seriesLinks.length ? `<section class="im-section"><h2>所属系列</h2><div class="im-series-links">${seriesLinks.map(link => `<button type="button" data-im-action="series" data-im-series="${esc(link.id)}">${esc(link.name)}<small>${esc(link.role || "")}</small></button>`).join("")}</div></section>` : ""}
-        <section class="im-section im-records"><h2>我的经历 <small>${experiences.length}</small></h2>${experiences.length ? experiences.map(record => `<div class="im-record"><div class="im-record-meta"><time>${esc(record.date)}</time><span>${esc(labels.recordStatus(record.status))}</span>${record.id === work.currentExperienceId ? "<span>当前状态</span>" : ""}</div><p>${esc(record.content || "已记录此状态")}</p></div>`).join("") : "<p class='im-muted'>还没有经历记录。</p>"}</section>
-        ${userFields.length ? `<section class="im-section"><h2>我的字段</h2><dl class="im-info-grid">${info(userFields.map(field => [field.key, field.value]))}</dl></section>` : ""}
-        ${history.length ? `<section class="im-section"><h2>评分记录</h2><div class="im-rating-history">${history.slice().reverse().map(entry => `<div><time>${esc((entry.at || "").replace("T", " ").slice(0, 16))}</time><strong>${Number(entry.score).toFixed(1)}</strong><span>${esc(entry.reason || "")}</span></div>`).join("")}</div></section>` : ""}
+        <section class="im-section im-records"><h2>我的经历 <small>${experiences.length}</small></h2>${experiences.length ? experiences.map(record => `<div class="im-record"><div class="im-record-meta"><time>${esc(record.date)}</time><span>${esc(labels.recordStatus(record.status))}</span>${record.id === work.currentExperienceId ? "<span>当前状态</span>" : ""}<button type="button" data-im-action="delete-experience" data-im-experience="${esc(record.id)}">删除</button></div><p>${esc(record.content || "已记录此状态")}</p></div>`).join("") : "<p class='im-muted'>还没有经历记录。</p>"}
+          <div class="im-work-form"><label>添加经历 <input type="date" data-im-experience-date></label><select data-im-experience-status aria-label="经历状态">${statusOptions.map(([key, value]) => `<option value="${esc(key)}">${esc(value)}</option>`).join("")}</select><textarea data-im-experience-content rows="2" placeholder="进度或备注"></textarea><button type="button" class="im-button" data-im-action="add-experience">添加经历</button></div>
+        </section>
+        <section class="im-section"><h2>评分记录</h2><div class="im-work-form im-score-form"><label>个人评分 <input type="range" min="0" max="10" step="0.5" value="${work.rating == null ? 8 : Number(work.rating)}" data-im-score-range><output data-im-score-output>${work.rating == null ? "8.0" : Number(work.rating).toFixed(1)}</output></label><input type="text" data-im-score-reason placeholder="评分原因（可选）"><button type="button" class="im-button" data-im-action="save-rating">记录评分</button></div>
+          ${history.length ? `<div class="im-rating-history">${history.slice().reverse().map(entry => `<div><time>${esc((entry.at || "").replace("T", " ").slice(0, 16))}</time><strong>${Number(entry.score).toFixed(1)}</strong><span>${esc(entry.reason || "")}</span></div>`).join("")}</div>` : "<p class='im-muted'>还没有评分变化记录。</p>"}
+        </section>
+        <section class="im-section"><h2>我的字段</h2>${userFields.length ? `<dl class="im-info-grid">${info(userFields.map(field => [field.key, field.value]))}</dl>` : "<p class='im-muted'>还没有自定义字段。</p>"}<div class="im-work-form im-user-field-form"><input type="text" data-im-user-field-key placeholder="字段名"><input type="text" data-im-user-field-value placeholder="内容"><button type="button" class="im-button" data-im-action="add-user-field">添加字段</button></div></section>
+        <section class="im-section im-work-actions"><button type="button" class="im-button" data-im-action="delete-work">删除作品</button></section>
       </div>`;
   }
 
-  function create({ root, getWork, getWorks, getSeries = () => null, getLabels, getSeriesLinks = () => [], getBackgroundSettings = () => ({}), openEdit = () => {}, onOpenSeries = () => {}, openDetails, openSeriesDetails, closeDetails, captureOrigin, restoreOrigin, mainRoots, notify = () => {} }) {
+  function create({ root, getWork, getWorks, getSeries = () => null, getLabels, getSeriesLinks = () => [], getBackgroundSettings = () => ({}), openEdit = () => {}, onOpenSeries = () => {}, onManageSeries = () => {}, onRateWork = () => {}, onAddExperience = () => {}, onDeleteExperience = () => {}, onAddUserField = () => {}, onDeleteWork = () => {}, captureOrigin, restoreOrigin, mainRoots, notify = () => {} }) {
     const loader = ArchiveV2.backgrounds.createLoader();
     const seriesBackgrounds = ArchiveV2.seriesImmersive.createBackgrounds();
     const music = ArchiveV2.audioPlayer;
-    let session = null, lastSession = null, detail = false, origin = null;
+    let session = null, lastSession = null, origin = null, closeCompletion = null;
     let inertBefore = [], overflowBefore = "", scrollRestorationBefore = "auto", transitionPending = false;
     const historyState = () => history.state?.archiveImmersive;
     const ownsHistory = () => session && historyState()?.token === session.token;
+    const catalogState = {query:"",category:"all",edge:0,edgeFrame:0,edgeAt:0};
+    const entityIndex = () => {
+      if (!session?.entities?.length) return 0;
+      const current = session.entities.findIndex(item => item.id === (session.seriesId || session.currentId));
+      return Math.max(0, current >= 0 ? current : session.entities.findIndex(item => item.id === session.navigationAnchor));
+    };
     let backgroundTone = "soft";
     try { if (localStorage.getItem("grdag_immersive_brightness") === "bright") backgroundTone = "bright"; } catch (_) { /* 存储不可用时本次浏览仍可切换。 */ }
 
@@ -78,6 +90,51 @@
     function mountMusic() {
       const series = session.seriesId ? getSeries(session.seriesId) : null;
       music.setTarget(ArchiveV2.audio.resolve(getWork(session.currentId), series, session.page === 'series'));
+    }
+    function queueItems() {
+      if (!session) return [];
+      if (session.entities?.length) return session.entities.map(item => item.type === "series"
+        ? {type:"series",id:item.id,entity:getSeries(item.id)}
+        : {type:"work",id:item.id,entity:getWork(item.id)}).filter(item=>item.entity);
+      if(session.page==="series"&&session.seriesId)return ArchiveV2.seriesImmersive.members(getSeries(session.seriesId),getWork).map(work=>({type:"work",id:work.id,entity:work}));
+      const ids=session.ids;
+      return ids.map(id=>({type:"work",id,entity:getWork(id)})).filter(item=>item.entity);
+    }
+    function filmCategory(item) {
+      if(item.type==="work")return getLabels(item.entity).category||"其它";
+      const cats=[...new Set(ArchiveV2.seriesImmersive.members(item.entity,getWork).map(work=>getLabels(work).category||"其它"))];
+      return cats.length===1?cats[0]:"系列";
+    }
+    function filmMatches(item) {
+      const members=item.type==="series"?ArchiveV2.seriesImmersive.members(item.entity,getWork):[item.entity];
+      const categoryOk=catalogState.category==="all"||(item.type==="series"?members.some(work=>(getLabels(work).category||"其它")===catalogState.category):filmCategory(item)===catalogState.category);
+      const q=catalogState.query.trim().toLocaleLowerCase();
+      const text=[item.entity.title,item.entity.name,...members.flatMap(work=>[work.title,work.originalTitle])].filter(Boolean).join(" ").toLocaleLowerCase();
+      return categoryOk&&(!q||text.includes(q));
+    }
+    function renderFilmstrip() {
+      const strip=root.querySelector(".im-filmstrip");if(!strip||!session)return;
+      const items=queueItems(), currentId=session.page==="series"?(session.navigationAnchor||session.seriesId):session.currentId;
+      const current=items.find(item=>item.id===currentId)||(session.page==="series"&&session.seriesId?items.find(item=>item.type==="work"&&(item.entity.primarySeriesId===session.seriesId||getSeries(session.seriesId)?.members?.some(member=>member.id===item.id))):null);
+      const selectedId=current?.id||currentId;
+      const cats=[...new Set(items.flatMap(item=>item.type==="series"?ArchiveV2.seriesImmersive.members(item.entity,getWork).map(work=>getLabels(work).category||"其它"):[filmCategory(item)]))];
+      if(catalogState.category!=="all"&&!cats.includes(catalogState.category))catalogState.category="all";
+      const visible=items.filter(item=>filmMatches(item)||item.id===selectedId);
+      const options=[`<option value="all">全部分类</option>`,...cats.map(cat=>`<option value="${esc(cat)}" ${catalogState.category===cat?"selected":""}>${esc(cat)}</option>`)].join("");
+      const cards=visible.map(item=>{const entity=item.entity,title=entity.title||entity.name||"未命名",cover=entity.coverUrl||(item.type==="series"?ArchiveV2.seriesImmersive.members(entity,getWork).find(work=>work.coverUrl)?.coverUrl:""),selected=item.id===selectedId,filterExempt=selected&&!filmMatches(item),index=items.findIndex(x=>x.id===item.id)+1;
+        const kind=item.type==="series"?"系列":filmCategory(item);
+        return `<button type="button" class="im-film-item${selected?" is-current":""}${filterExempt?" is-filter-exempt":""}" data-im-action="film-jump" data-im-film-id="${esc(item.id)}" data-im-film-type="${item.type}" aria-label="${esc(kind+" · "+title+(filterExempt?"，当前项，不符合筛选":""))}" aria-current="${selected?"true":"false"}" title="${esc(title+(filterExempt?" · 当前项，不符合筛选":""))}"><span class="im-film-cover">${cover?`<img src="${esc(cover)}" alt="" loading="lazy" decoding="async" data-im-poster>`:`<span class="im-film-placeholder">${esc(kind)}</span>`}<span class="im-film-index">${index}</span>${filterExempt?`<span class="im-film-filter-note">当前</span>`:""}</span><span class="im-film-title">${esc(title)}</span></button>`;
+      }).join("");
+      strip.innerHTML=`<div class="im-film-controls"><input type="search" data-im-film-search aria-label="搜索浏览队列" placeholder="搜索队列" value="${esc(catalogState.query)}"><select data-im-film-category aria-label="按分类筛选">${options}</select></div><div class="im-film-track" role="region" aria-label="当前浏览队列">${cards||`<span class="im-film-empty-state">没有匹配项</span>`}</div><div class="im-film-edge im-film-edge-left" data-film-edge="-1" aria-hidden="true"></div><div class="im-film-edge im-film-edge-right" data-film-edge="1" aria-hidden="true"></div>`;
+      strip.dataset.count=String(items.length);strip.dataset.queueMode=items.some(item=>item.type==="series")?"entities":"works";
+      requestAnimationFrame(()=>strip.querySelector(".im-film-item.is-current")?.scrollIntoView({block:"nearest",inline:"nearest"}));bindPosters();
+    }
+    function stopFilmEdge() { cancelAnimationFrame(catalogState.edgeFrame);catalogState.edgeFrame=0;catalogState.edge=0; }
+    function runFilmEdge() {
+      if(!catalogState.edge||globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches)return stopFilmEdge();
+      const track=root.querySelector(".im-film-track");if(!track)return stopFilmEdge();
+      const now=performance.now(),delta=Math.min(32,now-catalogState.edgeAt||16);catalogState.edgeAt=now;
+      track.scrollLeft+=catalogState.edge*delta*.42;catalogState.edgeFrame=requestAnimationFrame(runFilmEdge);
     }
     function toggleBackgroundTone() {
       backgroundTone = backgroundTone === "bright" ? "soft" : "bright";
@@ -101,20 +158,23 @@
     function writeHistory(push = false) {
       if (!session) return;
       const state = { ...(history.state && typeof history.state === "object" ? history.state : {}),
-        archiveImmersive: { token: session.token, currentId: session.currentId, seriesId: session.seriesId, page: session.page, surface: session.surface, detail } };
+        archiveImmersive: { token: session.token, currentId: session.currentId, seriesId: session.seriesId, page: session.page, surface: session.surface } };
       try { history[push ? "pushState" : "replaceState"](state, ""); } catch (_) { /* 显式导航仍可使用。 */ }
     }
     function end() {
       if (!session) return;
-      if (detail) closeDetails();
       lastSession = { ...session, ids: session.ids.slice() };
-      session = null; detail = false; transitionPending = false; loader.cancel(); seriesBackgrounds.cancel();
+      session = null; transitionPending = false; loader.cancel(); seriesBackgrounds.cancel();
+      stopFilmEdge();root.classList.remove("filmstrip-open");
       music.close();
       root.hidden = true; root.innerHTML = "";
       inertBefore.forEach(([node, value]) => { node.inert = value; }); inertBefore = [];
       document.body.style.overflow = overflowBefore;
       history.scrollRestoration = scrollRestorationBefore;
       restoreOrigin(origin);
+      const completion = closeCompletion;
+      closeCompletion = null;
+      if (completion) requestAnimationFrame(completion);
     }
     function reconcile() {
       if (session?.seriesId) {
@@ -144,7 +204,7 @@
     }
     function focus(action, memberId) {
       requestAnimationFrame(() => {
-        if (!session || detail) return;
+        if (!session) return;
         const target = memberId ? [...root.querySelectorAll("[data-im-member]")].find(node => node.dataset.imMember === memberId) : root.querySelector(`[data-im-action="${action}"]:not([disabled])`);
         target?.focus({preventScroll:true});
       });
@@ -153,15 +213,19 @@
       const series = getSeries(session.seriesId), works = ArchiveV2.seriesImmersive.members(series, getWork);
       session.category ||= "all"; session.query ||= "";
       if (session.category !== "all" && !works.some(work => work.category === session.category)) session.category = "all";
+      const hasEntityQueue = session.entities?.length > 1;
+      const position = entityIndex();
       root.dataset.view = "series";
       root.innerHTML = `<div class="im-window"><div class="im-scene" aria-hidden="true"></div><div class="im-shade" aria-hidden="true"></div>
-        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">← 返回作品库</button></div><div class="im-location"><span>系列典藏</span><strong>${works.length} 件作品</strong></div>${viewControls()}</header>
-        <div class="im-scroll ims-scroll">${ArchiveV2.seriesImmersive.content(series, works, getLabels, session)}</div></div>`;
+        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">← 返回作品库</button><button type="button" class="im-button im-manage-series" data-im-action="manage-series">管理系列</button></div><div class="im-location"><span>系列典藏</span><strong>${session.entities?.length ? `${entityIndex() + 1} / ${session.entities.length}` : `${works.length} 件作品`}</strong></div>${viewControls()}</header>
+        <div class="im-scroll ims-scroll">${ArchiveV2.seriesImmersive.content(series, works, getLabels, session)}</div>
+        ${hasEntityQueue ? `<button type="button" class="im-side-arrow im-side-prev" data-im-action="previous" ${position === 0 ? "disabled" : ""} aria-label="上一个展示项目">‹</button><button type="button" class="im-side-arrow im-side-next" data-im-action="next" ${position === session.entities.length - 1 ? "disabled" : ""} aria-label="下一个展示项目">›</button>` : ""}<div class="im-filmstrip" data-im-filmstrip></div><button type="button" class="im-film-reveal" data-im-action="film-reveal" data-film-reveal aria-label="显示浏览队列"></button></div>`;
       bindPosters();
       mountMusic();
       const scene = root.querySelector(".im-scene");
       seriesBackgrounds.start(series, works, (image, kind) => paint(scene, image, kind), getBackgroundSettings(), session.sharedUrl);
       root.querySelector(".im-scroll").scrollTop = session.seriesScroll || 0;
+      renderFilmstrip();
       if (session.focusMember) { focus(null, session.focusMember); session.focusMember = null; }
       else focus(focusAction);
     }
@@ -183,7 +247,6 @@
     }
     function render(focusAction = "close") {
       if (!reconcile()) { end(); return; }
-      if (detail) return;
       loader.cancel(); seriesBackgrounds.cancel();
       root.dataset.surface = session.surface; root.dataset.background = "default"; root.hidden = false;
       root.dataset.backgroundTone = backgroundTone;
@@ -192,67 +255,69 @@
       const work = getWork(session.currentId);
       const labels = getLabels(work);
       const index = session.ids.indexOf(session.currentId);
-      const previous = getWork(ArchiveV2.browse.adjacent(session, -1));
-      const next = getWork(ArchiveV2.browse.adjacent(session, 1));
+      const memberBrowse = !!session.seriesId;
+      const previous = !memberBrowse && session.entities?.length ? entityIndex() > 0 : getWork(ArchiveV2.browse.adjacent(session, -1));
+      const next = !memberBrowse && session.entities?.length ? entityIndex() < session.entities.length - 1 : getWork(ArchiveV2.browse.adjacent(session, 1));
       const source = session.seriesId ? getSeries(session.seriesId).name : session.source || "当前筛选结果";
       root.dataset.surface = session.surface;
       root.hidden = false;
       root.innerHTML = `<div class="im-window">
         <div class="im-scene" aria-hidden="true" data-background="default"></div><div class="im-shade" aria-hidden="true"></div>
-        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">${session.seriesId ? `← 返回系列<span class="im-return-name"> · ${esc(source)}</span>` : "← 返回作品库"}</button><button type="button" class="im-catalog-toggle" data-im-action="catalog" aria-expanded="false" aria-controls="imCatalog">☷ <span>作品目录</span></button></div>
-          <div class="im-location" aria-live="polite"><span>${esc(source)}</span><strong>${index + 1} <i>/</i> ${session.ids.length}</strong></div>
+        <header class="im-toolbar"><div class="im-toolbar-start"><button type="button" class="im-button im-return" data-im-action="close">${session.seriesId ? `← 返回系列<span class="im-return-name"> · ${esc(source)}</span>` : "← 返回作品库"}</button></div>
+          <div class="im-location" aria-live="polite"><span>${esc(source)}</span><strong>${session.entities?.length ? `${entityIndex() + 1} <i>/</i> ${session.entities.length}` : `${index + 1} <i>/</i> ${session.ids.length}`}</strong></div>
           <div class="im-toolbar-controls"><button type="button" class="im-button im-edit" data-im-action="edit" aria-label="编辑作品" title="编辑作品">编辑</button>${viewControls()}</div></header>
         <div class="im-scroll"><article class="im-card">${completeWorkContent(work, labels, getSeriesLinks(work))}</article></div>
-        <button type="button" class="im-side-arrow im-side-prev" data-im-action="previous" ${previous ? "" : "disabled"} aria-label="前一件">‹</button><button type="button" class="im-side-arrow im-side-next" data-im-action="next" ${next ? "" : "disabled"} aria-label="后一件">›</button>
-        <aside id="imCatalog" class="im-catalog" hidden><div class="im-catalog-head"><strong>作品目录</strong><button type="button" data-im-action="catalog-close" aria-label="关闭目录">×</button></div><input type="search" data-im-catalog-search placeholder="搜索作品" aria-label="搜索作品"><div class="im-catalog-list"></div></aside>
+        <button type="button" class="im-side-arrow im-side-prev" data-im-action="previous" ${previous ? "" : "disabled"} aria-label="前一个展示项目">‹</button><button type="button" class="im-side-arrow im-side-next" data-im-action="next" ${next ? "" : "disabled"} aria-label="下一个展示项目">›</button>
+        <div class="im-filmstrip" data-im-filmstrip></div><button type="button" class="im-film-reveal" data-im-action="film-reveal" data-film-reveal aria-label="显示浏览队列"></button>
       </div>`;
       bindPosters();
       mountMusic();
+      const experienceDate = root.querySelector("[data-im-experience-date]");
+      if (experienceDate && !experienceDate.value) experienceDate.value = new Date().toISOString().slice(0, 10);
       const scene = root.querySelector(".im-scene");
-      const catalogWorks = session.seriesId ? session.ids.map(getWork).filter(Boolean) : getWorks();
-      const grouped = catalogWorks.reduce((map, item) => { const key = getLabels(item).category || "其它"; (map[key] ||= []).push(item); return map; }, {});
-      root.querySelector(".im-catalog-list").innerHTML = Object.entries(grouped).map(([key, items]) => `<details class="im-catalog-group"><summary>${esc(key)} <small>${items.length}</small></summary><div>${items.map(item => `<button type="button" class="im-catalog-item${item.id === session.currentId ? " is-current" : ""}" data-im-action="jump" data-im-jump="${esc(item.id)}">${esc(item.title || "未命名作品")}</button>`).join("")}</div></details>`).join("");
+      renderFilmstrip();
       loader.load(work, (image, kind) => paint(scene, image, kind), getBackgroundSettings(), {startUrl:session.startUrl});
       session.startUrl = "";
       requestAnimationFrame(() => {
-        if (!session || detail) return;
+        if (!session) return;
         const target = root.querySelector(`[data-im-action="${focusAction}"]:not([disabled])`) || root.querySelector('[data-im-action="close"]');
         target?.focus({ preventScroll: true });
       });
     }
-    function showDetails() {
-      if (!session || detail) return;
-      if (session.page === "series") rememberSeries();
-      else if (!getWork(session.currentId)) return;
-      session.contentScroll = root.querySelector(".im-scroll")?.scrollTop || 0;
-      detail = true; root.hidden = true; loader.cancel(); seriesBackgrounds.cancel();
-      writeHistory(true); openEntityDetails();
-    }
-    function openEntityDetails() { if (session.page === "series") openSeriesDetails(session.seriesId); else openDetails(session.currentId); }
-    function showBrowse() {
-      closeDetails(); detail = false; render("details");
-      const scroll = root.querySelector(".im-scroll");
-      if (scroll) scroll.scrollTop = session?.contentScroll || 0;
-      writeHistory();
+    function navigateEntities(offset) {
+      if (!session?.entities?.length) return false;
+      const target = session.entities[entityIndex() + offset];
+      if (!target) return false;
+      session.navigationAnchor = null;
+      session.seriesScroll = 0; session.contentScroll = 0; session.focusMember = null;
+      if (target.type === "series") {
+        session.seriesId = target.id; session.page = "series"; session.currentId = null;
+        session.ids = ArchiveV2.seriesImmersive.members(getSeries(target.id), getWork).map(work => work.id);
+        session.category = "all"; session.query = "";
+      } else {
+        session.seriesId = null; session.page = "work"; session.currentId = target.id;
+        session.ids = session.entities.filter(item => item.type === "work").map(item => item.id);
+        session.source = "全部作品";
+      }
+      render(offset > 0 ? "next" : "previous"); writeHistory();
+      return true;
     }
     function navigate(offset) {
-      if (!session || detail || transitionPending || session.page === "series") return;
+      if (!session || transitionPending) return;
+      if (session.page === "series") { navigateEntities(offset); return; }
+      if (!session.seriesId && navigateEntities(offset)) return;
       const target = ArchiveV2.browse.adjacent(session, offset);
       if (!target) return;
       session.currentId = target; session.contentScroll = 0;
       render(offset > 0 ? "next" : "previous"); writeHistory();
     }
-    function close() {
+    function close(completion = null) {
       if (!session || transitionPending) return;
-      if (!detail && session.seriesId && session.page === "work") { backToSeries(); return; }
-      if (!detail && session.page === "series") rememberSeries();
-      if (ownsHistory()) { transitionPending = true; history.go(detail ? -2 : -1); }
+      if (session.seriesId && session.page === "work") { backToSeries(); return; }
+      if (session.page === "series") rememberSeries();
+      closeCompletion = completion;
+      if (ownsHistory()) { transitionPending = true; history.back(); }
       else end();
-    }
-    function returnFromDetails() {
-      if (!session || !detail || transitionPending) return;
-      if (ownsHistory() && historyState().detail) { transitionPending = true; history.back(); }
-      else showBrowse();
     }
     root.onclick = event => {
       if (event.target === root && session?.surface === "overlay") { close(); return; }
@@ -271,6 +336,29 @@
           openEdit(work, scroll);
         }
       }
+      else if (action === "manage-series" && session?.page === "series") {
+        const id = session.seriesId;
+        close(() => onManageSeries(id));
+      }
+      else if (action === "save-rating" && session?.page === "work") {
+        const score = Number(root.querySelector("[data-im-score-range]")?.value);
+        const reason = root.querySelector("[data-im-score-reason]")?.value || "";
+        onRateWork(session.currentId, score, reason);
+      }
+      else if (action === "add-experience" && session?.page === "work") {
+        onAddExperience(session.currentId, {
+          date: root.querySelector("[data-im-experience-date]")?.value || "",
+          status: root.querySelector("[data-im-experience-status]")?.value || "",
+          content: root.querySelector("[data-im-experience-content]")?.value || "",
+        });
+      }
+      else if (action === "delete-experience" && session?.page === "work") {
+        onDeleteExperience(session.currentId, event.target.closest("[data-im-experience]")?.dataset.imExperience);
+      }
+      else if (action === "add-user-field" && session?.page === "work") {
+        onAddUserField(session.currentId, root.querySelector("[data-im-user-field-key]")?.value || "", root.querySelector("[data-im-user-field-value]")?.value || "");
+      }
+      else if (action === "delete-work" && session?.page === "work") onDeleteWork(session.currentId);
       else if (action === "series") {
         const id = event.target.closest("[data-im-series]")?.dataset.imSeries;
         if (id) onOpenSeries(id);
@@ -281,19 +369,18 @@
         root.querySelectorAll("[data-im-category]").forEach(button => button.setAttribute("aria-pressed", button.dataset.imCategory === session.category));
         filterMembers();
       }
-      else if (action === "catalog" || action === "catalog-close") {
-        const panel = root.querySelector(".im-catalog");
-        const open = action === "catalog" && panel.hidden;
-        panel.style.setProperty("--im-catalog-top", `${root.querySelector(".im-toolbar").offsetHeight + 4}px`);
-        panel.hidden = !open;
-        root.querySelector(".im-catalog-toggle")?.setAttribute("aria-expanded", open);
-        root.querySelector(open ? "[data-im-catalog-search]" : ".im-catalog-toggle")?.focus();
+      else if (action === "film-reveal") {
+        root.classList.toggle("filmstrip-open");
       }
-      else if (action === "jump") {
-        const id = event.target.closest("[data-im-jump]").dataset.imJump;
-        if (!getWork(id)) return;
-        if (!session.ids.includes(id)) { session.ids = getWorks().map(work => work.id); session.source = "全部作品"; }
-        session.currentId = id; session.contentScroll = 0; render("catalog"); writeHistory();
+      else if (action === "film-jump") {
+        const button=event.target.closest("[data-im-film-id]"),id=button?.dataset.imFilmId;
+        if(!button||!id)return;
+        if(button.dataset.imFilmType==="series"&&getSeries(id)){
+          session.seriesId=id;session.page="series";session.currentId=null;session.ids=ArchiveV2.seriesImmersive.members(getSeries(id),getWork).map(work=>work.id);session.navigationAnchor=null;session.category="all";session.query="";
+        }else if(getWork(id)){
+          session.page="work";session.currentId=id;session.seriesId=null;session.ids=session.entities?.length?session.entities.filter(item=>item.type==="work").map(item=>item.id):session.ids;session.contentScroll=0;
+        }
+        render("close");writeHistory();
       }
       else if (session && ["overlay", "fullscreen"].includes(action)) {
         session.surface = action; root.dataset.surface = action;
@@ -303,17 +390,16 @@
     };
     root.oninput = event => {
       if (event.target.dataset.imMusic === 'volume') { music.setVolume(Number(event.target.value) / 100); return; }
+      if (event.target.matches("[data-im-score-range]")) { root.querySelector("[data-im-score-output]").value = Number(event.target.value).toFixed(1); return; }
       if (event.target.matches("[data-im-series-search]")) { session.query = event.target.value; filterMembers(); return; }
-      if (!event.target.matches("[data-im-catalog-search]")) return;
-      const query = event.target.value.trim().toLocaleLowerCase();
-      root.querySelectorAll(".im-catalog-item").forEach(item => { item.hidden = query && !item.textContent.toLocaleLowerCase().includes(query); });
-      root.querySelectorAll(".im-catalog-group").forEach(group => { group.hidden = query && ![...group.querySelectorAll(".im-catalog-item")].some(item => !item.hidden); if (query) group.open = true; });
+      if(event.target.matches("[data-im-film-search]")){catalogState.query=event.target.value;renderFilmstrip();const input=root.querySelector("[data-im-film-search]");input?.focus();input?.setSelectionRange(input.value.length,input.value.length);}
     };
     root.onchange = event => {
       const field = event.target.dataset.imMusic;
       if (field === 'enabled') music.setEnabled(event.target.checked);
       else if (field === 'loop') music.setLoop(event.target.checked);
       else if (field === 'pauseHidden') music.setPauseHidden(event.target.checked);
+      else if(event.target.matches("[data-im-film-category]")){catalogState.category=event.target.value;renderFilmstrip();}
     };
     window.addEventListener('pagehide', () => music.destroy());
     function filterMembers() {
@@ -325,29 +411,49 @@
       seriesBackgrounds.resume(); bindPosters();
     }
     root.onpointerover = event => {
+      if(event.pointerType!=="touch"){
+        const edge=event.target.closest("[data-film-edge]");
+        if(edge){catalogState.edge=Number(edge.dataset.filmEdge);catalogState.edgeAt=performance.now();if(!catalogState.edgeFrame)catalogState.edgeFrame=requestAnimationFrame(runFilmEdge);}
+        if(event.target.closest("[data-film-reveal]"))root.classList.add("filmstrip-open");
+      }
       if (event.pointerType === "touch" || session?.page !== "series") return;
       const card = event.target.closest("[data-im-member]");
       if (card && !card.contains(event.relatedTarget)) seriesBackgrounds.preview(getWork(card.dataset.imMember));
     };
     root.onpointerout = event => {
+      const edge=event.target.closest("[data-film-edge]");if(edge&&!edge.contains(event.relatedTarget))stopFilmEdge();
+      if(event.target.closest("[data-film-reveal]")&&!root.querySelector(".im-filmstrip")?.contains(event.relatedTarget))root.classList.remove("filmstrip-open");
       if (event.pointerType === "touch" || session?.page !== "series") return;
       const card = event.target.closest("[data-im-member]");
       if (card && !card.contains(event.relatedTarget)) seriesBackgrounds.resume();
     };
     root.onfocusin = event => {
+      if(event.target.closest(".im-filmstrip"))root.classList.add("filmstrip-open");
       if (session?.page !== "series" || !event.target.matches(":focus-visible")) return;
       const card = event.target.closest("[data-im-member]");
       if (card) seriesBackgrounds.preview(getWork(card.dataset.imMember));
     };
-    root.onfocusout = event => { if (session?.page === "series" && event.target.closest("[data-im-member]")) seriesBackgrounds.resume(); };
+    root.onfocusout = event => {
+      if(event.target.closest(".im-filmstrip")&&!root.querySelector(".im-filmstrip")?.contains(event.relatedTarget))root.classList.remove("filmstrip-open");
+      if (session?.page === "series" && event.target.closest("[data-im-member]")) seriesBackgrounds.resume();
+    };
+    root.onpointermove=event=>{
+      if(event.pointerType==="touch")return;
+      const rect=root.getBoundingClientRect();
+      if(event.clientY>=rect.bottom-14)root.classList.add("filmstrip-open");
+      else if(!event.target.closest(".im-filmstrip,[data-film-reveal]"))root.classList.remove("filmstrip-open");
+    };
     root.onkeydown = event => {
-      const catalog = root.querySelector(".im-catalog");
-      if (event.key === "Escape" && catalog && !catalog.hidden) {
-        event.preventDefault(); event.stopPropagation(); catalog.hidden = true;
-        root.querySelector(".im-catalog-toggle")?.setAttribute("aria-expanded", false);
-        root.querySelector(".im-catalog-toggle")?.focus(); return;
+      if (event.key === "Escape" && root.classList.contains("filmstrip-open")) {
+        event.preventDefault(); event.stopPropagation(); root.classList.remove("filmstrip-open"); return;
       }
-      if (event.target.closest(".im-catalog")) return;
+      if (event.target.closest(".im-filmstrip")) {
+        if(event.target.matches(".im-film-item")&&(event.key==="ArrowLeft"||event.key==="ArrowRight")){
+          const buttons=[...root.querySelectorAll(".im-film-item")],index=buttons.indexOf(document.activeElement),target=buttons[index+(event.key==="ArrowRight"?1:-1)];
+          if(target){event.preventDefault();target.focus();target.scrollIntoView({block:"nearest",inline:"nearest"});}
+        }
+        return;
+      }
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.target.closest("input,textarea,select,[contenteditable=true],summary")) return;
       if (["ArrowLeft", "ArrowRight"].includes(event.key)) { event.preventDefault(); event.stopPropagation(); navigate(event.key === "ArrowLeft" ? -1 : 1); }
     };
@@ -361,29 +467,33 @@
       session.page = state.page;
       session.surface = state.surface === "fullscreen" ? "fullscreen" : "overlay";
       if (!reconcile()) { end(); return; }
-      if (state.detail) {
-        if (!detail) { detail = true; root.hidden = true; loader.cancel(); seriesBackgrounds.cancel(); openEntityDetails(); }
-      } else if (detail) showBrowse();
-      else render();
+      render();
     });
     return {
-      open(ids, currentId, surface = "overlay", source = "当前筛选结果") {
+      open(ids, currentId, surface = "overlay", source = "当前筛选结果", entities = null) {
         if (session) return;
+        root.classList.remove("filmstrip-open");
+        catalogState.query="";catalogState.category="all";stopFilmEdge();
         session = ArchiveV2.browse.create(ids, currentId, surface);
         if (!session || !getWork(currentId)) { session = null; return; }
-        session.token = `${Date.now()}-${Math.random().toString(36).slice(2)}`; session.source = source;
-        origin = captureOrigin(currentId); detail = false; lock(); render(); writeHistory(true);
+        session.token = `${Date.now()}-${Math.random().toString(36).slice(2)}`; session.source = source; session.entities = entities;
+        origin = captureOrigin(currentId); lock(); render(); writeHistory(true);
       },
-      openSeries(seriesId, surface = "overlay", matchedIds = null) {
+      openSeries(seriesId, surface = "overlay", matchedIds = null, entities = null) {
         if (session || !getSeries(seriesId)) return;
-        session = {seriesId, page:"series", currentId:null, ids:[], surface:surface === "fullscreen" ? "fullscreen" : "overlay", category:"all", query:"", matchedIds,
+        root.classList.remove("filmstrip-open");
+        catalogState.query="";catalogState.category="all";stopFilmEdge();
+        session = {seriesId, page:"series", currentId:null, ids:[], surface:surface === "fullscreen" ? "fullscreen" : "overlay", category:"all", query:"", matchedIds, entities,
           token:`${Date.now()}-${Math.random().toString(36).slice(2)}`};
-        origin = captureOrigin(seriesId); detail = false; lock(); render(); writeHistory(true);
+        if(entities?.length&&!entities.some(item=>item.type==="series"&&item.id===seriesId)){
+          const memberIds=new Set(ArchiveV2.seriesImmersive.members(getSeries(seriesId),getWork).map(work=>work.id));
+          session.navigationAnchor=entities.find(item=>item.type==="work"&&memberIds.has(item.id))?.id||null;
+        }
+        origin = captureOrigin(seriesId); lock(); render(); writeHistory(true);
       },
       editReturned(scroll = 0) {
         if (!session || !getWork(session.currentId)) return false;
         session.editing = false;
-        detail = false;
         render("edit");
         const scroller = root.querySelector(".im-scroll");
         if (scroller) scroller.scrollTop = scroll;
@@ -399,38 +509,35 @@
       },
       enterRelatedSeries(id) {
         if (!session || !getSeries(id) || transitionPending) return false;
-        const series = getSeries(id);
-        session = {seriesId:id,page:"series",currentId:null,ids:[],surface:"fullscreen",category:"all",query:"",matchedIds:null,token:session.token};
-        detail = false; render("catalog"); writeHistory(); return true;
+        const currentEntity = session.entities?.find(item => item.id === session.currentId || item.id === session.seriesId);
+        const navigationAnchor = session.navigationAnchor || currentEntity?.id || session.currentId;
+        session = {...session,seriesId:id,page:"series",currentId:null,ids:[],surface:"fullscreen",category:"all",query:"",matchedIds:null,navigationAnchor};
+        render("catalog"); writeHistory(); return true;
       },
       ensureOpen() {
         if (!session) return false;
-        if (detail) { detail = false; render("details"); writeHistory(); }
         return true;
       },
-      close, returnFromDetails,
+      close,
       playWork(id) {
         const work = getWork(id);
         if (!work) return false;
         if (!session) return false;
         if (!session.ids.includes(id)) session.ids = [...new Set([id, ...session.ids])];
-        detail = false; session.page = "work"; session.currentId = id; session.contentScroll = 0;
+        session.page = "work"; session.currentId = id; session.contentScroll = 0;
         session.seriesId = null; session.source = "音乐播放列表";
         render(); writeHistory(); return true;
       },
       isOpen: () => !!session,
-      isDetail: () => detail,
-      overlayRoot: () => session && !detail ? root : null,
+      overlayRoot: () => session ? root : null,
       refresh() {
         if (!session) return;
         if (session.editing) return;
         if (!reconcile()) { close(); return; }
-        if (!detail) {
-          if (session.page === "series") rememberSeries();
-          const action = document.activeElement?.dataset.imAction || "close";
-          const scroll = root.querySelector(".im-scroll")?.scrollTop || 0;
-          render(action); if (root.querySelector(".im-scroll")) root.querySelector(".im-scroll").scrollTop = scroll;
-        }
+        if (session.page === "series") rememberSeries();
+        const action = document.activeElement?.dataset.imAction || "close";
+        const scroll = root.querySelector(".im-scroll")?.scrollTop || 0;
+        render(action); if (root.querySelector(".im-scroll")) root.querySelector(".im-scroll").scrollTop = scroll;
       },
     };
   }

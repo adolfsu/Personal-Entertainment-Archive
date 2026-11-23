@@ -118,12 +118,33 @@ test('an empty library can show empty series, but active filters do not leak the
   assert.doesNotMatch(a.elements.get('#wall').innerHTML, /data-sid="empty"/);
 });
 
-test('non-home work entry opens immersive browsing while home keeps the drawer', () => {
+test('work entries on both home and archive open immersive browsing', () => {
   const a = app(async () => response({}));
-  a.run('S.works=[{id:"w",title:"作品",category:"book"}];let opened=[];openDrawer=id=>opened.push("drawer:"+id);ensureImmersive=()=>{immersiveView={isOpen:()=>false,open:(ids,id,surface,source)=>opened.push(`immersive:${id}:${surface}:${source}`)}}');
+  a.run('S.works=[{id:"w",title:"作品",category:"book"}];let opened=[];ensureImmersive=()=>{immersiveView={isOpen:()=>false,open:(ids,id,surface,source)=>opened.push(`immersive:${id}:${surface}:${source}`)}}');
   a.run('S.view="home";openCurrentWork("w")');
   a.run('S.view="archive";openCurrentWork("w")');
-  assert.deepEqual(Array.from(a.run('opened')), ['drawer:w','immersive:w:fullscreen:全部作品']);
+  assert.deepEqual(Array.from(a.run('opened')), ['immersive:w:fullscreen:正在进行','immersive:w:fullscreen:全部作品']);
+});
+
+test('fullscreen browse entities follow folded-series and flat-work wall order', () => {
+  const a = app(async () => response({}));
+  a.run('S.works=[{id:"a",title:"成员一",category:"book",primarySeriesId:"s"},{id:"b",title:"独立作品",category:"book"},{id:"c",title:"成员二",category:"book",primarySeriesId:"s"}];S.series=[{id:"s",name:"系列",memberCount:2,members:[{id:"a"},{id:"c"}]}];S.filters={cat:"all",status:"all",time:"all",q:"",group:"series"};let opened=[];ensureImmersive=()=>{immersiveView={open:(ids,id,surface,source,entities)=>opened.push({kind:"works",ids:Array.from(ids),id,surface,entities:Array.from(entities)}),openSeries:(id,surface,matched,entities)=>opened.push({kind:"series",id,surface,entities:Array.from(entities)})}}');
+  a.run('openImmersive(null,"fullscreen")');
+  assert.equal(a.run('opened[0].kind'), 'series');
+  assert.deepEqual(Array.from(a.run('opened[0].entities'), item => [item.type,item.id]), [['series','s'],['work','b']]);
+  a.run('S.filters.group="flat";openImmersive(null,"fullscreen")');
+  assert.equal(a.run('opened[1].kind'), 'works');
+  assert.deepEqual(Array.from(a.run('opened[1].entities'), item => [item.type,item.id]), [['work','a'],['work','b'],['work','c']]);
+});
+
+test('opening a visible series card carries the same folded wall queue as browse current results', () => {
+  const a = app(async () => response({}));
+  a.run('S.works=[{id:"a",title:"成员",category:"book",primarySeriesId:"s",status:"active",createdAt:"2026-11-23"},{id:"b",title:"独立",category:"book",status:"active",createdAt:"2026-11-23"}];S.series=[{id:"s",name:"系列",memberCount:1,members:[{id:"a"}]}];ArchiveV2.core.exhibitionItems=()=>S.filters.group==="flat"?S.works.map(entity=>({type:"work",entity})): [{type:"series",entity:{id:"s"}},{type:"work",entity:{id:"b"}}];S.view="archive";S.filters={cat:"all",status:"all",time:"all",q:"",sort:"recent",group:"series"};visibleWorks=()=>S.works;let opened=[];ensureImmersive=()=>{immersiveView={openSeries:(id,surface,matched,entities)=>opened.push({id,surface,entities:Array.from(entities||[])})}}');
+  a.run('openSeriesImmersive("s","fullscreen")');
+  assert.equal(a.run('opened[0].id'), 's');
+  assert.deepEqual(Array.from(a.run('opened[0].entities'), item => [item.type,item.id]), [['series','s'],['work','b']]);
+  a.run('S.filters.group="flat";openSeriesImmersive("s","fullscreen")');
+  assert.deepEqual(Array.from(a.run('opened[1].entities'), item => [item.type,item.id]), [['work','a'],['work','b']]);
 });
 
 test('all persisted entity mutation routes share the update entry', () => {

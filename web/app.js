@@ -38,9 +38,9 @@ const EXTERNAL_SEARCH_PLATFORMS = {
 const S = {
   version: "", works: [], series: [], seriesKinds: {}, seriesRoles: {}, settings: {}, categories: [], sourceLabels: {},
   filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
-  currentId: null, currentSeriesId: null,
+  currentSeriesId: null,
   view: "home",
-  drawerRating: 8, seriesRating: 8,
+  seriesRating: 8,
   add: { step: 1, category: null, source: null, items: [], draft: null, mode: "create", editId: null, busy: false, refItems: [], refSource: null, tmdbRaw: "", tmdbPreview: null, youshuRaw: "", youshuPreview: null, youshuApplied: null },
   seriesDraft: { mode: "create", attachTo: null },
   backups: [], undoAvailable: false, dataState: "normal", syncPending: false,
@@ -463,12 +463,11 @@ async function refreshSnapshot(afterMutation) {
   S.backups = b.backups || [];
   S.syncPending = false;
   el("#syncNotice").hidden = true;
-  if (S.currentId && !findWork(S.currentId)) closeDrawer();
   if (S.currentSeriesId && !seriesById(S.currentSeriesId)) closeDrawer();
   updateUndoBtn();
   if (S.dataState === "corrupt") { showCorrupt(b); return false; }
   renderTabs(); renderStatusChips(); renderWall(); renderStats(); renderHome();
-  if (S.currentId || S.currentSeriesId) renderDrawer();
+  if (S.currentSeriesId) renderSeriesDrawer();
   if (immersiveView) immersiveView.refresh();
   return true;
 }
@@ -583,20 +582,42 @@ function renderWall() {
 
 function openImmersive(id = null, surface = "overlay") {
   const list = visibleWorks();
-  const currentId = id || list[0]?.id;
-  if (!currentId || !list.some(work => work.id === currentId)) return toast("当前筛选下没有可浏览的作品");
+  const entities = ArchiveV2.core.exhibitionItems(list, S.series, S.filters).map(item => ({ type: item.type, id: item.entity.id }));
+  if (!entities.length) return toast("当前筛选下没有可浏览的作品");
+  const selected = id ? entities.find(item => item.id === id) : entities[0];
+  const current = selected || entities[0];
   ensureImmersive();
-  const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
-  immersiveView.open(list.map(work => work.id), currentId, surface, filtered ? "当前筛选结果" : "全部作品");
+  if (current.type === "series") {
+    const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+    immersiveView.openSeries(current.id, surface, filtered ? list.filter(work => work.primarySeriesId === current.id).map(work => work.id) : null, entities);
+  } else {
+    const workIds = entities.filter(item => item.type === "work").map(item => item.id);
+    immersiveView.open(workIds, current.id, surface, "全部作品", entities);
+  }
 }
 
 function openSeriesImmersive(id, surface = "overlay") {
   if (!seriesById(id)) return;
-  if (immersiveView?.isDetail()) { immersiveView.returnFromDetails(); return; }
-  if (el("#drawer").classList.contains("show")) closeDrawer({skipImmersive:true});
+  if (el("#seriesManager")?.classList.contains("show")) closeDrawer();
   ensureImmersive();
-  const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
-  immersiveView.openSeries(id, surface, S.view === "home" ? null : (filtered ? visibleWorks().map(work => work.id) : null));
+  if (S.view === "archive" || (S.view === "home" && surface === "fullscreen")) {
+    const list = visibleWorks();
+    const entities = ArchiveV2.core.exhibitionItems(list, S.series, S.filters).map(item => ({ type: item.type, id: item.entity.id }));
+    if (S.view === "archive" && S.filters.group === "flat" && entities.length) {
+      const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+      return immersiveView.openSeries(id, surface, filtered ? list.filter(work => work.primarySeriesId === id).map(work => work.id) : null, entities);
+    }
+    if (entities.some(item => item.type === "series" && item.id === id)) {
+      const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
+      return immersiveView.openSeries(id, surface, filtered ? list.filter(work => work.primarySeriesId === id).map(work => work.id) : null, entities);
+    }
+    if (S.view === "home" && surface === "fullscreen") {
+      const homeQueue = ArchiveV2.homeFeed?.activeWorks(S.works, S.settings?.home_hidden_work_ids) || S.works.filter(work => work.status === "active");
+      const queue = homeQueue.map(work => ({type:"work",id:work.id}));
+      if (queue.length) return immersiveView.openSeries(id, surface, null, queue);
+    }
+  }
+  immersiveView.openSeries(id, surface);
 }
 
 function ensureImmersive() {
@@ -604,14 +625,45 @@ function ensureImmersive() {
     immersiveView = ArchiveV2.immersive.create({
       root: el("#immersiveRoot"), getWork: findWork, getWorks: () => S.works,
       getSeries: seriesById, getSeriesLinks: work => (work.seriesLinks || []).map(link => ({id:link.id,name:seriesById(link.id)?.name || "（系列已删除）",role:S.seriesRoles[link.role] || link.role})),
-      openEdit: openImmersiveEdit, openSeriesDetails: openSeriesImmersive,
+      openEdit: openImmersiveEdit,
+      onManageSeries: id => openSeries(id),
       getBackgroundSettings: () => S.settings || {},
+      onRateWork: async (id, score, reason) => {
+        const result = await api(`/api/works/${id}/rating`, { method: "POST", body: { score, reason } });
+        if (!result.ok) return toast(result.error || "评分保存失败", true);
+        toast("评分已记录");
+      },
+      onAddExperience: async (id, experience) => {
+        const result = await api(`/api/works/${id}/experience`, { method: "POST", body: experience });
+        if (!result.ok) return toast(result.error || "经历添加失败", true);
+        toast("经历已添加");
+      },
+      onDeleteExperience: async (id, experienceId) => {
+        if (!experienceId) return;
+        const result = await api(`/api/works/${id}/experience/${experienceId}`, { method: "DELETE" });
+        if (!result.ok) return toast(result.error || "经历删除失败", true);
+        toast("经历已删除");
+      },
+      onAddUserField: async (id, key, value) => {
+        const work = findWork(id), name = key.trim(), text = value.trim();
+        if (!work || !name || !text) return toast("字段名和值都要填写", true);
+        const result = await api(`/api/works/${id}`, { method: "PATCH", body: { userFields: [...(work.userFields || []), { key: name, value: text }] } });
+        if (!result.ok) return toast(result.error || "字段添加失败", true);
+        toast("字段已添加");
+      },
+      onDeleteWork: async id => {
+        const work = findWork(id);
+        if (!work || !confirm(`确定删除《${work.title}》？该作品的评分与经历记录会一起删除。`)) return;
+        const result = await api(`/api/works/${id}`, { method: "DELETE" });
+        if (!result.ok) return toast(result.error || "删除失败", true);
+        toast("作品已删除");
+      },
       onOpenSeries: id => immersiveView?.enterRelatedSeries(id),
       notify: toast,
       getLabels: work => ({ category: catLabel(work.category), status: statusLabel(work), series: seriesNameOf(work),
+        statusOptions: (S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS,
         recordStatus: status => ((S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS)[status] || status }),
-      openDetails: openDrawer, closeDetails: () => closeDrawer({ skipImmersive: true }),
-      mainRoots: () => [el("#topbar"), el("#appSidebar"), el("#sidebarScrim"), el(".skip-link"), el("#homeView"), el("#archiveView"), el("#backdrop"), el("#drawer")].filter(Boolean),
+      mainRoots: () => [el("#topbar"), el("#appSidebar"), el("#sidebarScrim"), el(".skip-link"), el("#homeView"), el("#archiveView"), el("#seriesManager")].filter(Boolean),
       captureOrigin: workId => {
         const active = document.activeElement;
         const cards = elAll("#wall .card, #wall .series-card");
@@ -733,7 +785,7 @@ function openHomeImmersive(id) {
   const currentId = id || list[0]?.id;
   if (!currentId || !list.some(work => work.id === currentId)) return toast("首页没有可浏览的进行中作品");
   ensureImmersive();
-  immersiveView.open(list.map(work => work.id), currentId, "fullscreen", "正在进行");
+  immersiveView.open(list.map(work => work.id), currentId, "fullscreen", "正在进行", list.map(work => ({type:"work",id:work.id})));
 }
 
 function renderHiddenWorksManager() {
@@ -845,22 +897,24 @@ function handleHomeAction(event) {
 
 function openCurrentWork(id) {
   if (!findWork(id)) return;
-  if (S.view === "home") openDrawer(id);
-  else {
-    ensureImmersive();
-    const filtered = S.filters.cat !== "all" || S.filters.status !== "all" || S.filters.time !== "all" || S.filters.q.trim();
-    if (immersiveView.isOpen()) immersiveView.playWork(id);
-    else immersiveView.open(visibleWorks().map(work => work.id), id, "fullscreen", filtered ? "当前筛选结果" : "全部作品");
-  }
+  if (el("#seriesManager")?.classList.contains("show")) closeDrawer();
+  ensureImmersive();
+  if (immersiveView.isOpen()) return immersiveView.playWork(id);
+  const list = S.view === "home" ? (ArchiveV2.homeFeed?.activeWorks(S.works, S.settings?.home_hidden_work_ids) || S.works.filter(work => work.status === "active")) : visibleWorks();
+  const works = list.some(work => work.id === id) ? list : [findWork(id), ...list];
+  const entities = S.view === "home" ? works.map(work => ({type:"work",id:work.id})) :
+    ArchiveV2.core.exhibitionItems(works, S.series, S.filters).map(item => ({type:item.type,id:item.entity.id}));
+  const focused = entities.find(item => item.id === id);
+  if (focused?.type === "series") return immersiveView.openSeries(id, "fullscreen", null, entities);
+  immersiveView.open(entities.filter(item => item.type === "work").map(item => item.id), id, "fullscreen", S.view === "home" ? "正在进行" : "全部作品", entities);
 }
 
 function openCurrentSeries(id) {
   if (!seriesById(id)) return;
-  if (S.view === "home") openSeries(id);
-  else openSeriesImmersive(id, "fullscreen");
+  openSeriesImmersive(id, "fullscreen");
 }
 
-/* ------------------------------------------------------------ 详情抽屉 */
+/* ------------------------------------------------------------ 系列管理面板 */
 const overlayFocusStack = [];
 function rememberOverlayFocus() {
   const a = document.activeElement;
@@ -870,10 +924,10 @@ function restoreOverlayFocus() {
   const a = overlayFocusStack.pop();
   if (a && document.contains(a)) a.focus({ preventScroll: true });
 }
-function setDrawerState(open) {
-  const d = el("#drawer"), b = el("#backdrop");
-  if (d) { d.classList.toggle("show", open); d.setAttribute("aria-hidden", open ? "false" : "true"); }
-  if (b) { b.classList.toggle("show", open); b.setAttribute("aria-hidden", open ? "false" : "true"); }
+function setSeriesManagerState(open) {
+  const drawer = el("#seriesManager"), backdrop = el("#seriesManagerBackdrop");
+  if (drawer) { drawer.classList.toggle("show", open); drawer.setAttribute("aria-hidden", open ? "false" : "true"); }
+  if (backdrop) { backdrop.classList.toggle("show", open); backdrop.setAttribute("aria-hidden", open ? "false" : "true"); }
 }
 function focusAfterRender(sel) {
   requestAnimationFrame(() => { const t = el(sel); if (t) t.focus({ preventScroll: true }); });
@@ -881,39 +935,23 @@ function focusAfterRender(sel) {
 
 function findWork(id) { return S.works.find(w => w.id === id); }
 
-function openDrawer(id) {
-  S.currentId = id;
-  S.currentSeriesId = null;
-  const w = findWork(id);
-  if (!w) return;
-  const wasOpen = el("#drawer").classList.contains("show");
-  if (!wasOpen) rememberOverlayFocus();
-  S.drawerRating = w.rating == null ? 8 : w.rating;
-  setDrawerState(true);
-  renderDrawer();
-  if (!wasOpen) focusAfterRender("#drawerClose");
-}
-
 function openSeries(sid, keepFocus = false) {
   const s = seriesById(sid);
   if (!s) return;
-  const wasOpen = el("#drawer").classList.contains("show");
+  const wasOpen = el("#seriesManager").classList.contains("show");
   if (!wasOpen && !keepFocus) rememberOverlayFocus();
   S.currentSeriesId = sid;
-  S.currentId = null;
   S.seriesRating = s.rating == null ? 8 : s.rating;
-  setDrawerState(true);
-  renderDrawer();
-  if (!wasOpen) focusAfterRender("#drawerClose");
+  setSeriesManagerState(true);
+  renderSeriesDrawer();
+  if (!wasOpen) focusAfterRender("#seriesManagerClose");
 }
 
-function closeDrawer(options = {}) {
-  if (!el("#drawer").classList.contains("show")) return;
-  if (!options.skipImmersive && immersiveView?.isDetail()) { immersiveView.returnFromDetails(); return; }
-  ArchiveV2.bgmEditor.stop(el('#drawer'));
+function closeDrawer() {
+  if (!el("#seriesManager").classList.contains("show")) return;
+  ArchiveV2.bgmEditor.stop(el('#seriesManager'));
   restoreOverlayFocus();
-  setDrawerState(false);
-  S.currentId = null;
+  setSeriesManagerState(false);
   S.currentSeriesId = null;
 }
 
@@ -937,199 +975,6 @@ function sparkline(history) {
   </svg>`;
 }
 
-function renderDrawer() {
-  ArchiveV2.bgmEditor.stop(el('#drawer'));
-  if (S.currentSeriesId) return renderSeriesDrawer();
-  const w = findWork(S.currentId);
-  if (!w) return;
-  const hist = w.ratingHistory || [];
-  const exps = w.experiences || [];
-  const infobox = w.infobox || [];
-  const lastId = w.currentExperienceId || (exps.length ? exps[exps.length - 1].id : null);
-  const curExp = exps.find(e => e.id === lastId) || null;
-  const curHint = curExp ? `状态取自经历日期最新的一条（${curExp.date || "—"}）` : "";
-  const head = el("#drawerHead");
-  const cover = `<div class="cover-fallback"><span>${esc(catLabel(w.category))}</span></div>` +
-    (w.coverUrl ? `<img src="${esc(w.coverUrl)}" alt="">` : "");
-  head.innerHTML = `
-    <div class="drawer-cover${w.coverUrl ? " has-cover" : ""}">${cover}</div>
-    <div style="min-width:0;flex:1">
-      <h2 class="drawer-title" id="drawerTitle">${esc(w.title)}</h2>
-      <div class="drawer-sub">${esc([catLabel(w.category), w.year, ...(w.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
-      <div class="drawer-tags">
-        <span class="pill" data-status="${w.status}">${esc(statusLabel(w))}</span>
-        ${(w.tags || []).slice(0, 5).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
-      </div>
-      ${w.source && w.source.url ? `<div style="margin-top:8px;font-size:11px"><a href="${esc(w.source.url)}" target="_blank" rel="noreferrer" style="color:var(--lenso-tint-text);text-decoration:none;border-bottom:1px dotted var(--lenso-label-tertiary)">${esc(w.source.label || w.source.name)} 条目</a></div>` : ""}
-    </div>
-    <button class="icon-btn drawer-close" id="drawerClose" title="关闭" aria-label="关闭详情">${ICONS.close}</button>`;
-
-  const body = el("#drawerBody");
-  const bodyHTML = [];
-
-  /* 评分 */
-  bodyHTML.push(`<section class="section">
-    <div class="section-head"><h3>评分</h3><div class="line"></div>${w.ratingRef != null ? `<span class="hint">参考 ${fmtScore(w.ratingRef)}${w.ratingMeta && w.ratingMeta.total ? ` · ${w.ratingMeta.total} 人` : ""}</span>` : ""}</div>
-    <div class="rating-top">
-      <div class="rating-big ${w.rating == null ? "none" : ""}" id="ratingBig">${w.rating == null ? "未评分" : fmtScore(w.rating)}</div>
-      <div class="rating-meta">${hist.length ? `共修改 ${hist.length} 次<br>最近：${esc((hist[hist.length - 1].at || "").replace("T", " ").slice(0, 16))}` : "还没有评分记录"}<br>10 分制，0.5 步进</div>
-    </div>
-    <div class="rating-controls">
-      <input type="range" id="ratingRange" min="0" max="10" step="0.5" value="${S.drawerRating}">
-      <div class="score-num" id="ratingNum">${fmtScore(S.drawerRating)}</div>
-    </div>
-    <div class="rating-controls">
-      <input class="reason" id="ratingReason" placeholder="本次修改原因（可选）">
-      <button class="btn btn-primary btn-sm" id="ratingSave">记录评分</button>
-    </div>
-    ${sparkline(hist)}
-    ${hist.length ? `<div class="history">${hist.slice().reverse().map(h => `
-      <div class="history-row">
-        <div class="t">${esc((h.at || "").replace("T", " ").slice(0, 16))}</div>
-        <div class="delta">${h.prev == null ? "初评" : `<span class="${h.score >= h.prev ? "up" : "down"}">${fmtScore(h.prev)} → </span>`}<b>${fmtScore(h.score)}</b></div>
-        <div class="r" title="${esc(h.reason || "")}">${esc(h.reason || "")}</div>
-      </div>`).join("")}</div>` : ""}
-  </section>`);
-
-  /* 经历 */
-  bodyHTML.push(`<section class="section">
-    <div class="section-head"><h3>经历</h3><div class="line"></div><span class="hint">${esc(curHint || "按经历日期取最新一条")}</span></div>
-    <div class="exp-form">
-      <input type="date" id="expDate" value="${new Date().toISOString().slice(0, 10)}">
-      <select id="expStatus">${Object.entries((S.categories.find(c => c.key === w.category) || {}).statuses || GENERIC_STATUS)
-        .filter(([k]) => k !== "not_started")
-        .map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
-      <textarea id="expText" placeholder="这一条经历：看到哪了 / 玩到哪了 / 停下的原因…（可空）"></textarea>
-      <button class="btn btn-sm" id="expAdd">添加</button>
-    </div>
-    ${exps.length ? `<div class="timeline">${exps.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || "")).map(e => `
-      <div class="tl-item" data-status="${e.status}">
-        <div class="tl-head">
-          <span class="d">${esc(e.date || "")}</span>
-          <span class="pill" data-status="${e.status}">${esc(((S.categories.find(c => c.key === w.category) || {}).statuses || GENERIC_STATUS)[e.status] || e.status)}</span>
-          ${e.id === lastId ? `<span class="current-flag">当前状态</span>` : ""}
-          <button class="tl-del" data-del="${e.id}">删除</button>
-        </div>
-        ${e.content ? `<div class="tl-body">${esc(e.content)}</div>` : ""}
-      </div>`).join("")}</div>` : `<div class="muted-note">还没有经历记录。添加第一条后，作品状态会跟着它走。</div>`}
-  </section>`);
-
-  /* 所属系列 */
-  const wLinks = (w.seriesLinks || []).map(l => Object.assign({}, l, { name: (seriesById(l.id) || {}).name || "（系列已删除）" }));
-  const availSeries = S.series.filter(s => !wLinks.some(l => l.id === s.id));
-  bodyHTML.push(`<section class="section">
-    <div class="section-head"><h3>所属系列</h3><div class="line"></div><span class="hint">第一条为主系列，墙面按它折叠</span></div>
-    ${wLinks.length ? `<div class="series-links">${wLinks.map((l, i) => `<div class="sl-row">
-      <button class="sl-name" data-open-series="${l.id}">${esc(l.name)}</button>
-      <span class="tag">${esc(S.seriesRoles[l.role] || l.role)}</span>
-      ${i === 0 ? `<span class="sl-primary">主</span>` : ""}
-      <button class="btn btn-xs" data-unlink="${l.id}">移出</button>
-    </div>`).join("")}</div>` : `<div class="muted-note">还没归入任何系列。系列是手动划分的，可以先新建一个再归入。</div>`}
-    <div class="search-row" style="margin-top:10px">
-      <select id="linkSeries">${availSeries.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("") || `<option value="">（还没有系列）</option>`}</select>
-      <select id="linkRole" class="mini">${Object.entries(S.seriesRoles).map(([k, v]) => `<option value="${k}" ${k === "main" ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
-      <button class="btn btn-sm" id="linkSeriesAdd">加入</button>
-      <button class="btn btn-sm btn-ghost" id="newSeriesForWork">＋ 新建系列</button>
-    </div>
-  </section>`);
-
-  /* 基础信息 */
-  const base = [];
-  if (w.year) base.push(kvHTML("年份", w.year));
-  (w.creators || []).forEach(c => base.push(kvHTML(c.role, c.name, true)));
-  if (w.source && w.source.label) base.push(kvHTML("来源", w.source.label));
-  if (w.ratingMeta && w.ratingMeta.rank) base.push(kvHTML("排名", "#" + w.ratingMeta.rank));
-  if (w.lastExperienceAt) base.push(kvHTML("最近经历", w.lastExperienceAt));
-  base.push(kvHTML("添加于", (w.createdAt || "").replace("T", " ").slice(0, 16)));
-  bodyHTML.push(`<section class="section">
-    <div class="section-head"><h3>基础信息</h3><div class="line"></div></div>
-    <div class="field-grid">${base.join("")}</div>
-    ${(w.tags || []).length ? `<div class="tags" style="margin-top:12px">${w.tags.map(t => `<span class="tag accent">${esc(t)}</span>`).join("")}</div>` : ""}
-    ${w.summary ? `<div class="muted-note" style="margin-top:12px;max-height:120px;overflow:auto">${esc(w.summary)}</div>` : ""}
-  </section>`);
-
-  /* 来源详情 */
-  if (infobox.length) {
-    const shown = infobox.slice(0, 8);
-    bodyHTML.push(`<section class="section">
-      <div class="section-head"><h3>来源详情</h3><div class="line"></div><span class="hint">${infobox.length} 项</span></div>
-      <div class="field-grid" id="infoboxGrid">${shown.map(i => kvHTML(i.key, i.value, i.value.length > 18)).join("")}</div>
-      ${infobox.length > 8 ? `<div id="infoboxMore" style="display:none"><div class="field-grid" style="margin-top:8px">${infobox.slice(8).map(i => kvHTML(i.key, i.value, i.value.length > 18)).join("")}</div></div><button class="collapse-btn" id="expandInfo">展开全部 ${infobox.length} 项</button>` : ""}
-    </section>`);
-  }
-
-  /* 我的字段 */
-  bodyHTML.push(`<section class="section">
-    <div class="section-head"><h3>我的字段</h3><div class="line"></div></div>
-    <div class="field-grid" id="userFieldsGrid">${(w.userFields || []).map(i => kvHTML(i.key, i.value, true)).join("") || `<div class="muted-note">可以加任意自己的字段，比如「通关时长」「二刷日期」「借给谁了」。</div>`}</div>
-    <div class="search-row" style="margin-top:10px">
-      <input id="ufKey" placeholder="字段名，如 通关时长" style="flex:0 0 40%">
-      <input id="ufVal" placeholder="值">
-      <button class="btn btn-sm" id="ufAdd">添加字段</button>
-    </div>
-  </section>`);
-
-  bodyHTML.push(`<section class="section drawer-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px">
-    <button class="btn" id="editWork">${ICONS.plus} 编辑信息</button>
-    <button class="btn btn-danger" id="deleteWork">删除作品</button>
-  </section>`);
-
-  body.innerHTML = bodyHTML.join("");
-
-  /* 事件绑定 */
-  el("#drawerClose").onclick = closeDrawer;
-  const range = el("#ratingRange");
-  range.oninput = () => { S.drawerRating = parseFloat(range.value); el("#ratingNum").textContent = fmtScore(S.drawerRating); };
-  el("#ratingSave").onclick = async () => {
-    const r = await api(`/api/works/${w.id}/rating`, { method: "POST", body: { score: S.drawerRating, reason: el("#ratingReason").value } });
-    if (!r.ok) return toast(r.error || "保存失败", true);
-    toast("评分已记录");
-    S.drawerRating = r.work.rating; renderDrawer(); renderWall(); renderStats();
-  };
-  el("#expAdd").onclick = async () => {
-    const body = { date: el("#expDate").value, status: el("#expStatus").value, content: el("#expText").value };
-    const r = await api(`/api/works/${w.id}/experience`, { method: "POST", body });
-    if (!r.ok) return toast(r.error || "添加失败", true);
-    toast("经历已添加"); renderDrawer(); renderWall(); renderStats();
-  };
-  elAll(".tl-del", body).forEach(b => b.onclick = async (ev) => {
-    ev.stopPropagation();
-    const r = await api(`/api/works/${w.id}/experience/${b.dataset.del}`, { method: "DELETE" });
-    if (!r.ok) return toast(r.error || "删除失败", true);
-    renderDrawer(); renderWall();
-  });
-  elAll("[data-open-series]", body).forEach(b => b.onclick = () => openSeries(b.dataset.openSeries));
-  elAll("[data-unlink]", body).forEach(b => b.onclick = async () => {
-    const r = await api(`/api/series/${b.dataset.unlink}/members/${w.id}`, { method: "DELETE" });
-    if (!r.ok) return toast(r.error || "移出失败", true);
-    renderDrawer(); toast("已移出系列");
-  });
-  el("#linkSeriesAdd").onclick = async () => {
-    const sid = el("#linkSeries").value;
-    if (!sid) return toast("还没有可加入的系列，先点「新建系列」", true);
-    const r = await api(`/api/series/${sid}/members`, { method: "POST", body: { workIds: [w.id], role: el("#linkRole").value } });
-    if (!r.ok) return toast(r.error || "加入失败", true);
-    renderDrawer(); toast("已加入系列");
-  };
-  el("#newSeriesForWork").onclick = () => openSeriesModal({ attachTo: w.id });
-  const ex = el("#expandInfo");  if (ex) ex.onclick = () => { const m = el("#infoboxMore"); const open = m.style.display !== "none"; m.style.display = open ? "none" : "block"; ex.textContent = open ? `展开全部 ${infobox.length} 项` : "收起"; };
-  el("#ufAdd").onclick = async () => {
-    const k = el("#ufKey").value.trim(), v = el("#ufVal").value.trim();
-    if (!k || !v) return toast("字段名和值都要填", true);
-    const fields = (w.userFields || []).concat([{ key: k, value: v }]);
-    const r = await api(`/api/works/${w.id}`, { method: "PATCH", body: { userFields: fields } });
-    if (!r.ok) return toast(r.error || "添加失败", true);
-    renderDrawer(); toast("字段已添加");
-  };
-  el("#editWork").onclick = () => openEdit(w);
-  el("#deleteWork").onclick = async () => {
-    if (!confirm(`确定删除《${w.title}》？该作品的评分与经历记录会一起删除。`)) return;
-    const r = await api(`/api/works/${w.id}`, { method: "DELETE" });
-    if (!r.ok) return toast(r.error || "删除失败", true);
-    closeDrawer(); renderWall(); renderTabs(); renderStats(); toast("已删除");
-  };
-}
-
 function renderSeriesDrawer() {
   const s = seriesById(S.currentSeriesId);
   if (!s) return;
@@ -1137,24 +982,24 @@ function renderSeriesDrawer() {
   const exps = (s.experiences || []).slice().sort((a, b) =>
     (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
   const coverSrc = s.coverUrl || (s.members.find(m => m.coverUrl) || {}).coverUrl || "";
-  el("#drawerHead").innerHTML = `
-    <div class="drawer-cover${coverSrc ? " has-cover" : ""}">
+  el("#seriesManagerHead").innerHTML = `
+    <div class="series-manager-cover${coverSrc ? " has-cover" : ""}">
       <div class="cover-fallback"><span>系列</span></div>
       ${coverSrc ? `<img src="${esc(coverSrc)}" alt="">` : ""}
     </div>
     <div style="min-width:0;flex:1">
-      <h2 class="drawer-title" id="drawerTitle">${esc(s.name)}</h2>
-      <div class="drawer-sub">${esc([s.kindLabel, s.yearRange, s.memberCount ? `${s.memberCount} 部作品` : "空系列",
+      <h2 class="series-manager-title" id="seriesManagerTitle">${esc(s.name)}</h2>
+      <div class="series-manager-sub">${esc([s.kindLabel, s.yearRange, s.memberCount ? `${s.memberCount} 部作品` : "空系列",
         ...(s.creators || []).map(c => c.role + " " + c.name)].filter(Boolean).join(" · "))}</div>
-      <div class="drawer-tags">
+      <div class="series-manager-tags">
         <span class="pill" data-status="${s.baseStatus}">${esc(s.baseStatusLabel)}</span>
         ${(s.tags || []).slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("")}
         <button type="button" class="btn btn-sm" id="seriesEnterExhibit">沉浸浏览 ↗</button>
       </div>
     </div>
-    <button class="icon-btn drawer-close" id="drawerClose" title="关闭" aria-label="关闭详情">${ICONS.close}</button>`;
+    <button class="icon-btn series-manager-close" id="seriesManagerClose" title="关闭" aria-label="关闭系列管理">${ICONS.close}</button>`;
 
-  const body = el("#drawerBody");
+  const body = el("#seriesManagerBody");
   const html = [];
   const pct = s.memberCount ? Math.round((s.completedCount / s.memberCount) * 100) : 0;
 
@@ -1267,7 +1112,7 @@ function renderSeriesDrawer() {
   ArchiveV2.bgmEditor.bind(body, 'seriesBgm', toast);
   ArchiveV2.backgroundEditor.bind(body, 'sBackgrounds', toast);
 
-  el("#drawerClose").onclick = closeDrawer;
+  el("#seriesManagerClose").onclick = closeDrawer;
   el("#seriesEnterExhibit").onclick = () => openSeriesImmersive(s.id);
   const rng = el("#sRatingRange");
   rng.oninput = () => { S.seriesRating = parseFloat(rng.value); el("#sRatingNum").textContent = fmtScore(S.seriesRating); };
@@ -1275,7 +1120,7 @@ function renderSeriesDrawer() {
     const r = await api(`/api/series/${s.id}/rating`, { method: "POST", body: { score: S.seriesRating, reason: el("#sRatingReason").value } });
     if (!r.ok) return toast(r.error || "保存失败", true);
     S.seriesRating = r.series.rating;
-    renderDrawer(); renderWall(); toast("评分已记录");
+    renderSeriesDrawer(); renderWall(); toast("评分已记录");
   };
   elAll(".member-row", body).forEach(row => {
     row.onclick = (ev) => {
@@ -1290,25 +1135,25 @@ function renderSeriesDrawer() {
     ev.stopPropagation();
     const r = await api(`/api/series/${s.id}/members/${b.dataset.msdel}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "移出失败", true);
-    renderDrawer(); toast("已移出");
+    renderSeriesDrawer(); toast("已移出");
   });
   el("#memberAdd").onclick = async () => {
     const wid = el("#memberPick").value;
     if (!wid) return toast("没有可添加的作品", true);
     const r = await api(`/api/series/${s.id}/members`, { method: "POST", body: { workIds: [wid], role: el("#memberRole").value } });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    renderDrawer(); toast("成员已添加");
+    renderSeriesDrawer(); toast("成员已添加");
   };
   el("#sExpAdd").onclick = async () => {
     const body2 = { date: el("#sExpDate").value, status: el("#sExpStatus").value, content: el("#sExpText").value };
     const r = await api(`/api/series/${s.id}/experience`, { method: "POST", body: body2 });
     if (!r.ok) return toast(r.error || "添加失败", true);
-    renderDrawer(); toast("经历已添加");
+    renderSeriesDrawer(); toast("经历已添加");
   };
   elAll("[data-sdel]", body).forEach(b => b.onclick = async () => {
     const r = await api(`/api/series/${s.id}/experience/${b.dataset.sdel}`, { method: "DELETE" });
     if (!r.ok) return toast(r.error || "删除失败", true);
-    renderDrawer();
+    renderSeriesDrawer();
   });
   el("#sSave").onclick = async () => {
     let bgm, backgrounds;
@@ -1326,7 +1171,7 @@ function renderSeriesDrawer() {
     if (!payload.name) return toast("系列名称不能为空", true);
     const r = await api(`/api/series/${s.id}`, { method: "PATCH", body: payload });
     if (!r.ok) return toast(r.error || "保存失败", true);
-     renderDrawer(); toast("已保存");
+     renderSeriesDrawer(); toast("已保存");
   };
   el("#sDelete").onclick = async () => {
     if (!confirm(`删除系列《${s.name}》？成员作品不会被删，只会解除归属。`)) return;
@@ -1356,7 +1201,7 @@ function activeOverlayRoot() {
   for (const sel of ["#addModal", "#seriesModal", "#settingsModal", "#hiddenWorksModal", "#musicModal"]) {
     if (modalIsOpen(sel)) return el(`${sel} .modal-box`);
   }
-  if (el("#drawer") && el("#drawer").classList.contains("show")) return el("#drawer");
+  if (el("#seriesManager")?.classList.contains("show")) return el("#seriesManager");
   if (immersiveView) return immersiveView.overlayRoot();
   return null;
 }
@@ -1908,7 +1753,7 @@ async function importTmdbToCurrent(mode) {
   a.tmdbPreview = null;
   a.draft = JSON.parse(JSON.stringify(r.work));
   closeAdd();
-  renderDrawer(); renderWall(); renderStats();
+  renderWall(); renderStats();
   toast(r.action === "updated"
     ? (overwrite ? "已用 TMDB 非空字段覆盖，评分、经历、系列和用户字段已保留" : "已按保护规则合并，已有非空资料未覆盖")
     : "已导入");
@@ -2377,7 +2222,6 @@ async function saveWork() {
     const immersiveReturn = S.add.returnToImmersive;
     if (immersiveReturn) S.add.saving = true;
     closeAdd();
-    if (!immersiveReturn) renderDrawer();
     renderWall();
     if (immersiveReturn) requestAnimationFrame(() => immersiveView?.editReturned(immersiveReturn.scrollTop));
     toast("已保存");
@@ -2566,7 +2410,7 @@ function bindGlobal() {
     const btn = el("#syncRetry");
     btn.disabled = true;
     try {
-     if (await reloadAll()) { renderDrawer(); toast("数据已同步"); }
+     if (await reloadAll()) { if (S.currentSeriesId) renderSeriesDrawer(); toast("数据已同步"); }
     } finally { btn.disabled = false; }
   };
   el("#searchInput").oninput = (e) => { S.filters.q = e.target.value; renderWall(); };
@@ -2647,7 +2491,7 @@ function bindGlobal() {
   el("#seriesCancel").onclick = closeSeriesModal;
   el("#seriesModal").onclick = (e) => { if (e.target.id === "seriesModal") closeSeriesModal(); };
   el("#seriesSave").onclick = saveSeriesDraft;
-  el("#backdrop").onclick = closeDrawer;
+  el("#seriesManagerBackdrop").onclick = closeDrawer;
   el("#settingsClose").onclick = closeSettings;
   el("#settingsClose2").onclick = closeSettings;
   el("#settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") closeSettings(); };
@@ -2679,7 +2523,7 @@ function bindGlobal() {
       else if (el("#settingsModal").classList.contains("show")) closeSettings();
       else if (el("#hiddenWorksModal").classList.contains("show")) closeHomeManager();
       else if (el("#musicModal").classList.contains("show")) closeAudioPlaylist();
-      else if (S.currentId || S.currentSeriesId) closeDrawer();
+      else if (S.currentSeriesId) closeDrawer();
       else if (immersiveView?.isOpen()) immersiveView.close();
       else if (document.body.classList.contains("sidebar-open")) closeSidebar();
     }
