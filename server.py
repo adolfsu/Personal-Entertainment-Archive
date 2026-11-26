@@ -32,6 +32,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
+import update_release
+
 BASE_DIR = os.path.abspath(os.environ.get("GRDAG_BASE_DIR") or os.path.dirname(os.path.abspath(__file__)))
 VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
 VERSION_UNKNOWN = "未标注"
@@ -3603,6 +3605,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def end_headers(self):
+        coordinator = getattr(self.server, "updater", None)
+        if coordinator and coordinator.ready:
+            self.close_connection = True
+            self.send_header("Connection", "close")
+        super().end_headers()
+
     # --- 输出工具
     def _send(self, code, body, ctype="application/json; charset=utf-8", extra_headers=None):
         if isinstance(body, str):
@@ -3716,6 +3725,18 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         qs = parse_qs(u.query)
         try:
+            if p == "/api/update/health":
+                return self.send_json({"version": VERSION, "instance": os.environ.get("PEA_UPDATE_INSTANCE", "")})
+            if p == "/api/update/status":
+                return self.send_json({"ok": True, **update_release.update_state(update_release.state_dir(update_release.Path(BASE_DIR)))})
+            if p == "/api/update/check":
+                coordinator = getattr(self.server, "updater", None)
+                if not coordinator:
+                    return self.send_json({"ok": False, "error": "请用启动脚本启动项目后再检查"}, 503)
+                try:
+                    return self.send_json({"ok": True, **coordinator.check(read_version())})
+                except update_release.UpdateError as e:
+                    return self.send_json({"ok": False, "error": str(e)}, 503)
             if p in ("/", "/index.html"):
                 return self.serve_file(os.path.join(WEB_DIR, "index.html"))
             if p.startswith("/covers/"):
@@ -3791,6 +3812,22 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path
         try:
+            coordinator = getattr(self.server, "updater", None)
+            if coordinator and coordinator.ready:
+                self.close_connection = True
+                return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
+            if p == "/api/update/install":
+                origin = f"http://127.0.0.1:{self.server.server_address[1]}"
+                if (self.headers.get("Origin") != origin or self.headers.get("Host") != origin[7:] or
+                        self.headers.get("Content-Type", "").split(";")[0] != "application/json"):
+                    return self.send_json({"ok": False, "error": "请从本机设置页发起更新"}, 403)
+                if not coordinator:
+                    return self.send_json({"ok": False, "error": "更新服务尚未启动"}, 503)
+                body = self.read_body()
+                try:
+                    return self.send_json({"ok": True, "job": coordinator.start(body, read_version())}, 202)
+                except update_release.UpdateError as e:
+                    return self.send_json({"ok": False, "error": str(e)}, 409)
             if p == "/api/audio":
                 return self.handle_audio_upload()
             if p == "/api/backgrounds/local":
@@ -3883,6 +3920,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_PATCH(self):
+        if getattr(self.server, "updater", None) and self.server.updater.ready:
+            self.close_connection = True
+            return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
         u = urlparse(self.path)
         body = self.read_body()
         try:
@@ -3930,6 +3970,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": False, "error": "not found"}, 404)
 
     def do_DELETE(self):
+        if getattr(self.server, "updater", None) and self.server.updater.ready:
+            self.close_connection = True
+            return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
         u = urlparse(self.path)
         try:
             return self._delete(u)
@@ -4748,6 +4791,16 @@ def _port_alive(port):
             pass
 
 
+class UpdateAwareHTTPServer(ThreadingHTTPServer):
+    # Drain existing requests before the installer can replace program files.
+    daemon_threads = False
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(8)
+        return connection, address
+
+
 def main():
     ensure_dirs()
     corrupt_error = ""
@@ -4772,7 +4825,8 @@ def main():
             pass
         return
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        httpd = UpdateAwareHTTPServer(("127.0.0.1", PORT), Handler)
+        httpd.updater = update_release.Coordinator(httpd, BASE_DIR, VERSION, LIB_VERSION)
     except OSError as e:
         print("=" * 52)
         print(f"  启动失败：端口 {PORT} 无法绑定（{e}）")
@@ -4804,10 +4858,15 @@ def main():
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止。")
+    finally:
+        httpd.server_close()
+        if httpd.updater.ready:
+            httpd.updater.ready.touch()
+            return 75
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main() or 0)
 
 
 

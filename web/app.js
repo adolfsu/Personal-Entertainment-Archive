@@ -2264,6 +2264,72 @@ function bindMediaCleanup() {
   };
 }
 
+function bindProjectUpdate() {
+  const check = el("#updateCheck"), install = el("#updateInstall"), status = el("#updateStatus");
+  const notes = el("#updateNotes");
+  let release;
+  function busy(value) {
+    check.disabled = value;
+    install.disabled = value || !release;
+  }
+  async function follow(job) {
+    busy(true);
+    const end = Date.now() + 210000;
+    while (check.isConnected && Date.now() < end) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const result = await api("/api/update/status");
+      if (!result.ok || result.job !== job) continue;
+      status.textContent = result.message;
+      if (result.phase === "installed" || result.phase === "rolled-back") {
+        status.textContent += "，正在刷新页面…";
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        location.reload();
+        return;
+      }
+      if (result.phase === "failed") {
+        busy(false);
+        return;
+      }
+    }
+    status.textContent = "服务暂未恢复，请稍后刷新查看结果。";
+    busy(false);
+  }
+  check.onclick = async () => {
+    release = null;
+    notes.hidden = true;
+    busy(true);
+    status.textContent = "正在检查官方发布…";
+    const result = await api("/api/update/check");
+    if (!result.ok) status.textContent = result.error || "检查更新失败";
+    else if (result.status === "unreleased") status.textContent = "暂未发布可自动安装的更新包。";
+    else if (result.status === "current") status.textContent = "没有比当前版本更新的发布。";
+    else if (result.status === "incompatible") status.textContent = `v${result.release.version} 需要手动升级，请查看发布说明。`;
+    else if (result.status === "available") {
+      release = result.release;
+      status.textContent = `可更新到 v${release.version}。`;
+      notes.textContent = release.notes || "";
+      notes.hidden = !release.notes;
+    }
+    busy(false);
+  };
+  install.onclick = async () => {
+    if (!release || !confirm(`安装 v${release.version} 并重启？请先保存正在编辑的内容。`)) return;
+    const target = release;
+    release = null;
+    busy(true);
+    status.textContent = "正在准备更新…";
+    const result = await api("/api/update/install", { method: "POST", body: { version: target.version, sha256: target.sha256 } });
+    if (result.ok) return follow(result.job);
+    status.textContent = result.error || "未能启动更新，请重新检查";
+    busy(false);
+  };
+  api("/api/update/status").then(result => {
+    if (!result.ok || !result.job || check.disabled || !check.isConnected) return;
+    status.textContent = result.message;
+    if (result.phase === "downloading" || result.phase === "restarting") follow(result.job);
+  });
+}
+
 function openSettings() {
   if (!modalIsOpen("#settingsModal")) rememberOverlayFocus();
   const st = S.settings || {};
@@ -2330,13 +2396,23 @@ function openSettings() {
       <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
       <button class="btn btn-danger" id="wipeAll">清空全部数据</button>
     </div>
-    <div class="muted-note" style="margin-top:16px">娱乐档案 ${esc(versionText(S.version))} · 版本号读取自项目根目录的 <b>VERSION</b> 文件</div>
+    <div class="section-head" style="margin-top:22px"><h3>关于与更新</h3><div class="line"></div></div>
+    <div class="muted-note">娱乐档案 ${esc(versionText(S.version))}</div>
     ${versionStaleNote()}
+    <div class="media-cleanup-actions" style="margin-top:8px">
+      <a class="btn btn-sm" href="https://github.com/adolfsu/Personal-Entertainment-Archive" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <a class="btn btn-sm" href="https://cnb.cool/adolfsu/Personal-Entertainment-Archive" target="_blank" rel="noopener noreferrer">CNB</a>
+      <button type="button" class="btn btn-sm" id="updateCheck">检查更新</button>
+      <button type="button" class="btn btn-sm" id="updateInstall" disabled>更新并重启</button>
+    </div>
+    <p class="tip" id="updateStatus" role="status"></p>
+    <p class="tip update-notes" id="updateNotes" hidden></p>
     <div class="muted-note" style="margin-top:6px">所有数据只存在这台电脑上</div>`;
   setModalState("#settingsModal", true);
   applyAppearance(false);
   focusAfterRender("#settingsClose");
   bindMediaCleanup();
+  bindProjectUpdate();
   el("#setModeSeg").onclick = (e) => {
     const b = e.target.closest("button[data-v]");
     if (b) setMode(b.dataset.v);

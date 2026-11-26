@@ -23,3 +23,5 @@ design/
 Thumbs.db
 *.tmp
 *.tmp-*
+.pea-updates/
+dist/

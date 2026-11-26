@@ -13,6 +13,7 @@ if errorlevel 1 goto missing
 set "PYEXE=python"
 :run
 "%PYEXE%" server.py
+if "%errorlevel%"=="75" exit /b 0
 echo.
 echo Server stopped. Press any key to close this window.
 pause >nul
