@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.Trash-0/
+
+# 个人数据与运行产物：绝不提交
+data/
+backups/
+logs/
+导入数据/
+备份/
+娱乐档案_备份/
+Personal-Entertainment-Archive-main/
+
+# 便携运行时（体积大，按需单独拷贝）
+runtime/
+
+# 打包产物与设计原型（体积大，不进仓库）
+*.zip
+design/
+
+# 系统/编辑器杂项
+.DS_Store
+Thumbs.db
+*.tmp
+*.tmp-*

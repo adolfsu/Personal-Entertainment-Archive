@@ -4,6 +4,8 @@
 .background-add-row{display:flex;align-items:stretch;gap:8px}
 .background-add-row input{min-width:0;flex:1}
 .background-add-row .btn{flex:none;min-width:66px}
+.background-local-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:7px}
+.background-local-row .btn{min-height:34px;padding:6px 11px;font-size:11px}
 .background-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:12px;margin:12px 0 0;padding:0;list-style:none}
 .background-grid:empty{display:none}
 .background-item{min-width:0;padding:6px;border:1px solid var(--lenso-separator);border-radius:10px;background:var(--lenso-background-secondary)}

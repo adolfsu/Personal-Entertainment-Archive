@@ -15,7 +15,8 @@
   function form(entity, id, label = "沉浸背景图片") {
     return `<div class="form-item full background-editor" data-background-editor="${id}">
       <label for="${id}Link">${esc(label)} <span class="background-count" data-background-count></span></label>
-      <div class="background-add-row"><input id="${id}Link" type="url" data-background-link placeholder="粘贴 HTTP / HTTPS 图片直链" autocomplete="off" aria-describedby="${id}Tip"><button type="button" class="btn" data-background-add>添加</button></div>
+      <div class="background-add-row"><input id="${id}Link" type="url" data-background-link placeholder="粘贴 HTTP / HTTPS 图片直链" autocomplete="off" aria-describedby="${id}Tip"><button type="button" class="btn" data-background-add>添加链接</button></div>
+      <div class="background-local-row"><button type="button" class="btn" data-background-paste>粘贴剪贴板图片</button><button type="button" class="btn" data-background-choose>选择本地图片</button><input type="file" data-background-file accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></div>
       <textarea id="${id}" data-background-value hidden>${esc(images(entity).join("\n"))}</textarea>
       <ol class="background-grid" data-background-grid aria-label="沉浸图片顺序"></ol>
       <p class="background-empty" data-background-empty>还没有背景图，粘贴图片直链后点击「添加」。</p>
@@ -29,6 +30,7 @@
     const get = selector => box.querySelector(selector);
     const value = get('[data-background-value]'), input = get('[data-background-link]');
     const grid = get('[data-background-grid]'), add = get('[data-background-add]'), message = get('[data-background-message]');
+    const fileInput = get('[data-background-file]'), pasteButton = get('[data-background-paste]'), chooseButton = get('[data-background-choose]');
     const state = {busy:false, drag:null}; states.set(box, state);
     const urls = () => unique(value.value.split(/\r?\n/));
     function draw() {
@@ -89,6 +91,38 @@
         clearTimeout(timer); state.busy = false; box.removeAttribute('aria-busy'); input.disabled = false; add.disabled = false;
       }
     }
+    async function uploadFiles(files) {
+      for (const file of Array.from(files || [])) {
+        if (urls().length >= 20) { message.textContent = '最多添加 20 张图片，剩余图片未添加。'; break; }
+        if (!/^image\/(png|jpeg|webp|gif)$/i.test(file.type) || file.size > 20 * 1024 * 1024) { message.textContent = '仅支持 20 MB 内的 PNG、JPEG、WebP 或 GIF 图片。'; continue; }
+        state.busy = true; box.setAttribute('aria-busy', 'true'); input.disabled = true; add.disabled = true; pasteButton.disabled = true; chooseButton.disabled = true;
+        message.textContent = `正在保存：${file.name || '剪贴板图片'}…`;
+        try {
+          const response = await fetch('/api/backgrounds/local', {method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});
+          const result = await response.json(); if (!response.ok || !result.ok) throw Error(result.error || '图片保存失败');
+          const local = ArchiveV2.backgrounds.safeBackgroundUrl(result.image?.url); if (!local?.startsWith('/covers/')) throw Error('未收到有效的本地图片');
+          if (!box.isConnected) return;
+          const list = urls(); if (!list.includes(local)) list.push(local);
+          commit(list, `图片已保存至本地（${result.image.width} × ${result.image.height}），保存后生效。`);
+        } catch (error) { const text = error.message || '图片保存失败，请重试。'; message.textContent = text; notify(text, true); }
+        finally { state.busy = false; box.removeAttribute('aria-busy'); input.disabled = false; add.disabled = false; pasteButton.disabled = false; chooseButton.disabled = false; }
+      }
+    }
+    chooseButton.onclick = () => fileInput.click();
+    fileInput.onchange = () => { uploadFiles(fileInput.files); fileInput.value = ''; };
+    pasteButton.onclick = async () => {
+      try {
+        const items = await navigator.clipboard.read(), files = [];
+        for (const item of items) for (const type of item.types.filter(type => /^image\/(png|jpeg|webp|gif)$/i.test(type))) files.push(new File([await item.getType(type)], 'clipboard.' + type.split('/')[1], {type}));
+        if (!files.length) { message.textContent = '剪贴板中没有可用图片。'; return; }
+        uploadFiles(files);
+      } catch (_) { message.textContent = '无法读取剪贴板；请聚焦此编辑区后按 Ctrl+V，或选择本地图片。'; }
+    };
+    box.addEventListener('paste', event => {
+      const files = Array.from(event.clipboardData?.items || []).filter(item => item.kind === 'file' && /^image\/(png|jpeg|webp|gif)$/i.test(item.type)).map(item => item.getAsFile()).filter(Boolean);
+      if (!files.length) return;
+      event.preventDefault(); uploadFiles(files);
+    });
     add.onclick = () => download(input.value.trim());
     input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); download(input.value.trim()); } };
     grid.onclick = event => {

@@ -89,9 +89,13 @@ python server.py
 ├─ web/
 │  ├─ index.html
 │  ├─ app.js           # 前端逻辑（原生 JS，无构建）
+│  ├─ collection.js    # 作品库视图：筛选、系列折叠 / 平铺、浏览队列
+│  ├─ exhibit-cards.js # 作品卡 / 系列卡渲染
+│  ├─ immersive.js     # 沉浸详情、胶片导航、编辑入口
 │  ├─ tmdb-bookmarklet.js # 旧 TMDB 书签脚本（导入区可一键复制）
 │  ├─ import-bookmarklet.js # 统一书签：TMDB + 优书网资料提取
-│  └─ style.css        # 展厅 / 书架、深色 / 浅色
+│  ├─ style.css        # 展厅 / 书架、深色 / 浅色
+│  └─ *.css / *.js     # 各模块样式与脚本，均原生、无构建
 ├─ data/
 │  ├─ library.json     # 作品、系列、评分、经历（首次运行自动生成）
 │  ├─ covers/          # 本地化封面
@@ -102,35 +106,51 @@ python server.py
 │  ├─ pre-restore/     # 恢复/撤销前的安全快照（不自动清理）
 │  └─ undo-used/       # 已被撤销消费的快照
 ├─ logs/app.log        # 本地运行日志（2 MB × 3 份滚动，密钥自动脱敏）
-├─ tests/test_core.py  # 核心数据安全测试（临时目录，不碰真实档案）
+├─ tests/              # 后端 unittest + 前端断言 + 隔离浏览器验收脚本
 ├─ 运行测试.bat         # 一键跑测试
 ├─ 使用说明.md          # 中文详细手册
+├─ 发布说明.md          # 仓库发布范围、隐私处理与同步说明
 ├─ README.md
 ├─ CHANGELOG.md
 └─ VERSION
 ```
 
-## 上传到 GitHub（网页上传）
+## 仓库与获取
 
-1. 新建一个空仓库（不要勾选自动生成 README）。
-2. 打开本项目目录，**全选里面的文件和文件夹**（Ctrl+A），拖到仓库的 "Upload files" 页面。
-3. 不要直接把整个外层文件夹拖进去，否则仓库里会多套一层目录。
-4. `runtime/` 不要上传：单文件约 43 MB、文件数上千，超过网页上传限制（单文件 25 MB、单次 100 个文件）。
-5. 个人数据（`data/library.json`、`data/covers/`、`backups/`、`导入数据/*.csv`）已在 `.gitignore` 中，正常不会被提交。
+公开仓库只放**能跑起来的代码和文档**，不含任何个人档案数据：
+
+- CNB：<https://cnb.cool/adolfsu/Personal-Entertainment-Archive>
+- GitHub：<https://github.com/adolfsu/Personal-Entertainment-Archive>
+
+```bash
+git clone https://github.com/adolfsu/Personal-Entertainment-Archive.git 娱乐档案
+cd 娱乐档案
+python server.py        # 首次运行会自建 data/、backups/、logs/
+```
+
+克隆下来的仓库没有 `runtime/`（约 43 MB、上千文件，超出仓库体积与网页上传限制）。两种跑法：
+
+1. 本机已有 Python 3.9+：直接 `python server.py`，或双击 `启动.bat`（脚本会自动退回系统 Python）。
+2. 想"拷走就能用"：自己下载 Windows embeddable Python 解压到 `runtime\python\`，再双击 `启动.bat`。
+
+发布范围、排除项与同步方式见 [发布说明.md](发布说明.md)。
 
 ## 数据与隐私
 
 | 路径 | 内容 | 是否提交 |
 |---|---|---|
 | `data/library.json` | 作品、评分、经历 | 不提交（`.gitignore`） |
-| `data/covers/` | 封面缓存 | 不提交 |
+| `data/covers/`、`data/audio/` | 封面与本地 BGM | 不提交 |
 | `data/image_cache/` | 搜索 / 详情预览图缓存 | 不提交 |
-| `backups/` | 自动快照 | 不提交 |
+| `backups/`、`logs/` | 自动快照与运行日志 | 不提交 |
 | `导入数据/*.csv` | 导入用的记录表 | 不提交 |
+| `runtime/`、`*.zip` | 便携运行时与打包产物 | 不提交 |
+| `design/` | 本地设计原型与截图（含大体积内嵌资源） | 不提交 |
 
 - 服务只监听 `127.0.0.1`，局域网内其他设备访问不到。
 - 抓取只访问公开页面 / 公开接口，不登录、不携带账号信息；封面只缓存到本地自用。
 - 上传仓库前可在设置面板点「清空数据」，清空前会自动把整库和封面打包到项目目录之外。
+- 公开仓库里的代码不写死本机路径、代理地址、账号或令牌；日志脱敏规则见「数据安全」。
 
 ## 数据来源
 
@@ -182,7 +202,15 @@ python server.py
 
 ## 版本号
 
-版本号只在根目录 `VERSION` 文件里写一次（形如 `1.2.3`，允许前导 `v`）。`server.py` 启动时读取它，网页副标题和设置面板显示的就是**本次运行加载的版本**；`/api/bootstrap` 还会返回磁盘上 `VERSION` 的当前值，两者不一致时设置面板会提示"项目目录里的 VERSION 已是 vX，重启程序后才会生效"。
+版本号遵循 `主版本.次版本.修订号`（语义化版本）格式，例如 `1.8.0`。它只在根目录 `VERSION` 文件里写一次（允许前导 `v`）。`server.py` 启动时读取它，网页副标题和设置面板显示的就是**本次运行加载的版本**；`/api/bootstrap` 还会返回磁盘上 `VERSION` 的当前值，两者不一致时设置面板会提示"项目目录里的 VERSION 已是 vX，重启程序后才会生效"。
+
+版本递增按改动影响选择：
+
+- **修订号（第三位）**：向后兼容的小修复、样式调整、文案或内部优化，例如 `1.7.23` → `1.7.24`。
+- **次版本号（第二位）**：新增功能或较大的体验改进，同时保持现有数据和使用方式兼容；递增后修订号归零，例如 `1.7.23` → `1.8.0`。
+- **主版本号（第一位）**：不兼容的重大改动，例如数据格式/核心操作方式需要迁移；递增后其余两位归零，例如 `1.8.0` → `2.0.0`。
+
+数字位没有固定上限，也不需要等修订号累积到某个数才递增次版本。每个版本只选与本次改动级别相符的一位递增。发布时同步把 `web/index.html` 中静态资源查询参数的版本更新到同一个值，确保浏览器刷新缓存；其余版本显示仍从 `VERSION` 读取。
 
 所以开发电脑改完版本、同步到使用电脑后，打开网页看一眼副标题或设置面板底部，就知道当前跑的是哪一版（没重启会明确提示）。发版时只改 `VERSION` 一个文件，不再改代码，也不再改 `README` / `CHANGELOG` 开头的版本声明。
 

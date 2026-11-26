@@ -14,9 +14,10 @@ document.querySelector('#run').onclick=async()=>{
     d.querySelector('#navArchive').click();await waitFor(()=>run('S.view')==='archive','作品库没有打开');
     d.querySelector('[data-series-immersive="mixed"]').click();
     await waitFor(()=>root().dataset.view==='series'&&!root().hidden,'系列入口失败');
-    const filmstrip=d.querySelector('.im-filmstrip');
-    check(!!filmstrip&&Number(filmstrip.dataset.count)===4,'系列页没有继承折叠展墙队列');
-    check(!root().classList.contains('filmstrip-open')&&w.getComputedStyle(filmstrip).visibility==='hidden','底部队列初始没有完全收起');
+    const filmstrip=()=>d.querySelector('.im-filmstrip');
+    check(!!filmstrip()&&Number(filmstrip().dataset.count)===4,'系列页没有继承折叠展墙队列');
+    check(!root().classList.contains('filmstrip-open')&&w.getComputedStyle(filmstrip()).display==='none','底部队列初始没有完全收起');
+    check(filmstrip().getBoundingClientRect().height===0,'收起胶片仍占据布局或绘制');
     d.querySelector('[data-film-reveal]').click();check(root().classList.contains('filmstrip-open'),'底部唤起按钮未展开队列');
     const filmSearch=d.querySelector('[data-im-film-search]');filmSearch.value='纸上的远行';filmSearch.dispatchEvent(new w.Event('input',{bubbles:true}));
     check(d.querySelectorAll('.im-film-item').length===2&&!!d.querySelector('[data-im-film-id="books"]')&&!!d.querySelector('.im-film-item.is-current'),'底部队列搜索未匹配或当前项丢失');
@@ -24,6 +25,8 @@ document.querySelector('#run').onclick=async()=>{
     d.querySelector('[data-im-film-id="books"]').click();await waitFor(()=>d.querySelector('#immersiveTitle').textContent==='纸上的远行','点击系列缩略图没有切换队列项目');
     d.querySelector('[data-im-action="previous"]').click();check(d.querySelector('#immersiveTitle').textContent==='山海之间','系列缩略图切换后前一项顺序错误');
     d.querySelector('[data-film-reveal]').click();check(!root().classList.contains('filmstrip-open'),'点击底部把手未收起队列');
+    await waitFor(()=>w.getComputedStyle(filmstrip()).display==='none','胶片关闭后未完成隐藏');
+    check(filmstrip().getBoundingClientRect().height===0,'胶片关闭后仍占据布局或绘制');
     check(!!d.querySelector('[data-im-action="manage-series"]'),'沉浸系列缺少系列管理入口');
     check(d.querySelectorAll('[data-im-member]').length===12,'未展示完整成员');
     await waitFor(()=>root().dataset.background==='dedicated','系列没有大图');

@@ -21,6 +21,27 @@ def png(color=(43, 76, 102)):
 
 
 class TestLocalBackgroundMedia(core.ServerCase):
+    def test_local_upload_validates_bytes_and_saves_deduplicated_original(self):
+        raw = png((11, 90, 180))
+        request = core.urllib.request.Request(core.BASE_URL + '/api/backgrounds/local', data=raw, method='POST', headers={'Content-Type':'application/octet-stream'})
+        with core.urllib.request.urlopen(request, timeout=15) as response:
+            status, result = response.status, json.loads(response.read())
+        self.assertEqual(status, 200)
+        url = result['image']['url']
+        self.assertEqual(url, '/covers/background_' + hashlib.sha256(raw).hexdigest() + '.png')
+        self.assertEqual(core.http('GET', url)[1], raw)
+        self.assertEqual(len(os.listdir(core.server.COVER_DIR)), 1)
+
+    def test_local_upload_rejects_invalid_and_oversized_files(self):
+        for raw in [b'not an image']:
+            request = core.urllib.request.Request(core.BASE_URL + '/api/backgrounds/local', data=raw, method='POST', headers={'Content-Type':'application/octet-stream'})
+            status = None
+            try:
+                with core.urllib.request.urlopen(request, timeout=15) as response: status = response.status
+            except core.urllib.error.HTTPError as error: status = error.code
+            self.assertEqual(status, 400)
+        self.assertEqual(os.listdir(core.server.COVER_DIR), [])
+
     def add(self, color=(43, 76, 102)):
         raw = png(color)
         with mock.patch.object(core.server, 'download_background_image', return_value=raw):

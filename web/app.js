@@ -37,7 +37,7 @@ const EXTERNAL_SEARCH_PLATFORMS = {
 
 const S = {
   version: "", works: [], series: [], seriesKinds: {}, seriesRoles: {}, settings: {}, categories: [], sourceLabels: {},
-  filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "series" },
+  filters: { cat: "all", status: "all", time: "all", sort: "recent", q: "", group: "flat" },
   currentSeriesId: null,
   view: "home",
   seriesRating: 8,
@@ -61,6 +61,7 @@ document.addEventListener("archive-audio-preview", () => {
 
 /* ------------------------------------------------------------ 外观（明暗 / 主题） */
 const APPEARANCE = {
+  scale: ["100", "115", "130", "150"].includes(localStorage.getItem("grdag_ui_scale")) ? localStorage.getItem("grdag_ui_scale") : "100",
   mode: localStorage.getItem("grdag_mode") || "dark",
   theme: localStorage.getItem("grdag_theme") || "stage",
   size: localStorage.getItem("grdag_size") || "small",
@@ -76,6 +77,7 @@ const THEME_ICON = {
 };
 
 function applyAppearance(save = true) {
+  document.documentElement.dataset.uiScale = APPEARANCE.scale;
   document.documentElement.dataset.mode = APPEARANCE.mode;
   document.documentElement.dataset.theme = APPEARANCE.theme;
   document.documentElement.dataset.size = APPEARANCE.size;
@@ -84,6 +86,7 @@ function applyAppearance(save = true) {
       localStorage.setItem("grdag_mode", APPEARANCE.mode);
       localStorage.setItem("grdag_theme", APPEARANCE.theme);
       localStorage.setItem("grdag_size", APPEARANCE.size);
+      localStorage.setItem("grdag_ui_scale", APPEARANCE.scale);
     } catch (e) {}
   }
   const mBtn = el("#modeBtn");
@@ -292,6 +295,7 @@ async function boot() {
   renderWall();
   renderStats();
   renderHome();
+  ArchiveV2.collection?.sidebar();
   bindGlobal();
 }
 
@@ -467,6 +471,8 @@ async function refreshSnapshot(afterMutation) {
   updateUndoBtn();
   if (S.dataState === "corrupt") { showCorrupt(b); return false; }
   renderTabs(); renderStatusChips(); renderWall(); renderStats(); renderHome();
+  ArchiveV2.collection?.sidebar();
+  ArchiveV2.collection?.render(S.view);
   if (S.currentSeriesId) renderSeriesDrawer();
   if (immersiveView) immersiveView.refresh();
   return true;
@@ -497,6 +503,7 @@ function renderTabs() {
     S.filters.cat = b.dataset.cat;
     S.filters.status = "all";
     renderTabs(); renderStatusChips(); renderWall();
+    ArchiveV2.collection?.sidebar();
   });
 }
 
@@ -663,9 +670,13 @@ function ensureImmersive() {
       getLabels: work => ({ category: catLabel(work.category), status: statusLabel(work), series: seriesNameOf(work),
         statusOptions: (S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS,
         recordStatus: status => ((S.categories.find(category => category.key === work.category) || {}).statuses || GENERIC_STATUS)[status] || status }),
-      mainRoots: () => [el("#topbar"), el("#appSidebar"), el("#sidebarScrim"), el(".skip-link"), el("#homeView"), el("#archiveView"), el("#seriesManager")].filter(Boolean),
+      mainRoots: () => [el("#topbar"), el("#appSidebar"), el("#sidebarScrim"), el(".skip-link"), el("#homeView"), el("#archiveView"), el("#seriesView"), el("#seriesManager")].filter(Boolean),
       captureOrigin: workId => {
         const active = document.activeElement;
+        if (S.view === "series") {
+          const tile = elAll("#seriesCollection [data-collection-series]").find(card => card.dataset.collectionSeries === workId);
+          return { view: S.view, scrollY: window.scrollY, seriesTileId: tile?.dataset.collectionSeries, offset: tile?.getBoundingClientRect().top };
+        }
         const cards = elAll("#wall .card, #wall .series-card");
         const work = findWork(workId);
         const homeAnchor = active.closest(".home-slide") || elAll(".home-slide").find(slide => slide.dataset.id === workId);
@@ -676,12 +687,13 @@ function ensureImmersive() {
       restoreOrigin: saved => requestAnimationFrame(() => {
         if (!saved) return;
         setAppView(saved.view || "archive", false);
-        const cards = elAll("#wall .card, #wall .series-card, .home-slide");
-        const anchor = cards.find(card => saved.workId ? card.dataset.id === saved.workId : saved.seriesId && card.dataset.sid === saved.seriesId);
+        const anchor = saved.view === "series" ?
+          elAll("#seriesCollection [data-collection-series]").find(card => card.dataset.collectionSeries === saved.seriesTileId) :
+          elAll("#wall .card, #wall .series-card, .home-slide").find(card => saved.workId ? card.dataset.id === saved.workId : saved.seriesId && card.dataset.sid === saved.seriesId);
         if (anchor && saved.offset != null) window.scrollTo(0, window.scrollY + anchor.getBoundingClientRect().top - saved.offset);
         else window.scrollTo(0, saved.scrollY);
         const target = (saved.focusId && document.getElementById(saved.focusId)) ||
-          anchor || el(saved.view === "home" ? "#homeContinueBtn" : "#enterExhibit");
+          anchor || el(saved.view === "series" ? '#seriesCollection [aria-pressed="true"]' : saved.view === "home" ? "#homeContinueBtn" : "#enterExhibit");
         target?.focus({ preventScroll: true });
       }),
     });
@@ -712,69 +724,28 @@ function homeRecentRecord(work) {
   return (work.experiences || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0] || null;
 }
 
-function homeProgress(work) {
-  const fields = (work.userFields || []).filter(field => /^(进度|阅读进度|观看进度|游玩进度|当前进度|当前集数|当前章节|完成进度|已读章节|已看集数)$/.test(field.key || "")).slice(0, 2);
-  return fields.map(field => `<div class="home-progress"><span>${esc(field.key)}</span><strong>${esc(field.value)}</strong></div>`).join("");
-}
-
-function homeSlideHTML(work, index, total, featured = false) {
-  const record = homeRecentRecord(work);
-  const count = `${String(index + 1).padStart(2, "0")} <span>/ ${String(total).padStart(2, "0")}</span>`;
-  const image = work.coverUrl
-    ? `<div class="home-art" aria-hidden="true"><img class="home-art-glow" src="${esc(work.coverUrl)}" alt="" loading="${index > 1 ? "lazy" : "eager"}" data-home-cover><img class="home-art-cover" src="${esc(work.coverUrl)}" alt="" loading="${index > 1 ? "lazy" : "eager"}" data-home-cover></div>`
-    : `<div class="home-art home-art-empty" aria-hidden="true"><span>${esc(catLabel(work.category))}</span><small>暂无封面</small></div>`;
-  return `<article class="home-slide${featured ? " is-featured" : ""}" data-id="${esc(work.id)}" tabindex="-1" aria-label="进行中作品：${esc(work.title)}">
-    ${image}
-    <div class="home-slide-shade" aria-hidden="true"></div>
-    <div class="home-slide-content">
-      <div class="home-slide-top"><span class="home-kicker">${featured ? "CONTINUE WHERE YOU LEFT OFF" : "IN PROGRESS"}</span><span class="home-index">${count}</span></div>
-      <div class="home-work-meta"><span>${esc(catLabel(work.category))}</span>${work.year ? `<span>${esc(work.year)}</span>` : ""}<span class="home-status">${esc(statusLabel(work))}</span></div>
-      <h${featured ? "1" : "2"} class="home-work-title">${esc(work.title || "未命名作品")}</h${featured ? "1" : "2"}>
-      ${work.originalTitle && work.originalTitle !== work.title ? `<p class="home-original-title">${esc(work.originalTitle)}</p>` : ""}
-      ${work.summary ? `<p class="home-summary">${esc(work.summary.length > 180 ? `${work.summary.slice(0, 180)}…` : work.summary)}</p>` : ""}
-      <div class="home-personal-row">${work.rating != null ? `<span class="home-rating"><b>${fmtScore(work.rating)}</b><small>/ 10 个人评分</small></span>` : `<span class="home-rating home-unrated">尚未评分</span>`}${homeProgress(work)}</div>
-      ${record ? `<div class="home-record"><time>${esc(record.date || "最近记录")}</time><span>${esc(record.content || statusLabel(work))}</span></div>` : ""}
-      <div class="home-slide-actions">
-        <button class="btn btn-primary" data-home-action="immersive" data-home-id="${esc(work.id)}">沉浸浏览 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
-        <button class="btn" data-home-action="details" data-home-id="${esc(work.id)}">作品详情</button>
-        <button class="home-hide-btn" data-home-action="hide" data-home-id="${esc(work.id)}" title="从首页隐藏" aria-label="从首页隐藏《${esc(work.title)}》"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-6 9-6 9 6 9 6-3.2 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.5"/><path d="m5 5 14 14"/></svg><span>从首页隐藏</span></button>
-      </div>
-      ${featured ? `<div class="home-hero-footer"><span>${total} 部进行中</span><button class="home-manage-link" data-home-action="manage">管理首页作品</button><span class="home-scroll-hint">向下滚动继续浏览</span></div>` : ""}
-    </div>
-  </article>`;
-}
-
 function renderHome() {
-  const hero = el("#homeHero"), feed = el("#homeFeed");
-  if (!hero || !feed || !ArchiveV2.homeFeed) return;
-  const active = activeHomeWorks();
-  if (!active.length) {
-    const hiddenCount = ArchiveV2.homeFeed.hiddenWorks(S.works, S.settings?.home_hidden_work_ids).length;
-    hero.innerHTML = `<div class="home-empty"><p class="home-kicker">PERSONAL ARCHIVE</p><h1>从这里继续</h1><p>${S.works.some(work => work.status === "active") ? "首页作品暂时都已隐藏，可以重新选择需要展示的作品。" : "还没有进行中的作品。去展厅更新作品状态，或先添加一部作品。"}</p><div class="home-slide-actions"><button class="btn btn-primary" data-home-action="archive">打开展厅</button>${hiddenCount ? `<button class="btn" data-home-action="manage">恢复已隐藏作品（${hiddenCount}）</button>` : `<button class="btn" data-home-action="add">添加作品</button>`}</div></div>`;
-    feed.replaceChildren();
-    return;
-  }
-  hero.innerHTML = homeSlideHTML(active[0], 0, active.length, true);
-  feed.innerHTML = active.slice(1).map((work, index) => homeSlideHTML(work, index + 1, active.length)).join("");
-  elAll("[data-home-cover]").forEach(image => {
-    image.onerror = () => { image.hidden = true; };
-    if (image.complete && !image.naturalWidth) image.hidden = true;
-  });
+  ArchiveV2.collection?.home();
 }
 
 function setAppView(view, scroll = true) {
-  S.view = view === "archive" ? "archive" : "home";
-  const shell = el("#appShell"), home = el("#homeView"), archive = el("#archiveView");
+  const titles = ArchiveV2.collection?.headings || {home:"正在进行",archive:"作品库"};
+  S.view = Object.hasOwn(titles, view) ? view : "home";
+  const shell = el("#appShell");
   if (shell) shell.dataset.view = S.view;
-  if (home) home.hidden = S.view !== "home";
-  if (archive) archive.hidden = S.view !== "archive";
-  document.documentElement.dataset.homeSnap = String(S.view === "home");
-  el("#topbarContext").textContent = S.view === "home" ? "正在进行" : "作品库";
+  for (const key of Object.keys(titles)) {
+    const section = el(`#${key}View`);
+    if (section) section.hidden = S.view !== key;
+  }
+  document.documentElement.dataset.homeSnap = "false";
+  el("#topbarContext").textContent = titles[S.view];
   elAll("[data-app-nav]").forEach(button => {
     const current = button.dataset.appNav === S.view;
     if (current) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  ArchiveV2.collection?.sidebar();
+  ArchiveV2.collection?.render(S.view);
   closeSidebar();
   if (S.view === "archive") requestAnimationFrame(() => applyWallDensity());
   if (scroll) window.scrollTo({ top: 0, behavior: "auto" });
@@ -900,13 +871,14 @@ function openCurrentWork(id) {
   if (el("#seriesManager")?.classList.contains("show")) closeDrawer();
   ensureImmersive();
   if (immersiveView.isOpen()) return immersiveView.playWork(id);
-  const list = S.view === "home" ? (ArchiveV2.homeFeed?.activeWorks(S.works, S.settings?.home_hidden_work_ids) || S.works.filter(work => work.status === "active")) : visibleWorks();
+  const list = S.view === "home" ? (ArchiveV2.homeFeed?.activeWorks(S.works, S.settings?.home_hidden_work_ids) || S.works.filter(work => work.status === "active")) :
+    S.view === "archive" ? visibleWorks() : S.works;
   const works = list.some(work => work.id === id) ? list : [findWork(id), ...list];
-  const entities = S.view === "home" ? works.map(work => ({type:"work",id:work.id})) :
+  const entities = S.view !== "archive" ? works.map(work => ({type:"work",id:work.id})) :
     ArchiveV2.core.exhibitionItems(works, S.series, S.filters).map(item => ({type:item.type,id:item.entity.id}));
   const focused = entities.find(item => item.id === id);
   if (focused?.type === "series") return immersiveView.openSeries(id, "fullscreen", null, entities);
-  immersiveView.open(entities.filter(item => item.type === "work").map(item => item.id), id, "fullscreen", S.view === "home" ? "正在进行" : "全部作品", entities);
+  immersiveView.open(entities.filter(item => item.type === "work").map(item => item.id), id, "fullscreen", S.view === "archive" ? "全部作品" : (ArchiveV2.collection?.headings[S.view] || "正在进行"), entities);
 }
 
 function openCurrentSeries(id) {
@@ -2246,6 +2218,52 @@ async function saveWork() {
 }
 
 /* ------------------------------------------------------------ 设置 / 备份 */
+function bindMediaCleanup() {
+  const scan = el("#mediaScan"), stage = el("#mediaStage"), status = el("#mediaStatus");
+  const folder = el("#mediaFolder"), details = el("#mediaDetails"), list = el("#mediaFiles");
+  let preview = null;
+  const sizeLabel = bytes => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  const busy = value => {
+    scan.disabled = value;
+    stage.disabled = value || !preview?.files.length;
+  };
+  scan.onclick = async () => {
+    preview = null;
+    busy(true);
+    details.hidden = true;
+    status.textContent = "正在检查…";
+    const result = await api("/api/media-cleanup");
+    if (!result.ok) status.textContent = result.error || "素材检查失败";
+    else {
+      preview = result;
+      folder.textContent = result.folder;
+      const images = result.files.filter(file => file.kind === "covers").length;
+      const music = result.files.length - images;
+      const held = [result.backupOnly && `备份仍需 ${result.backupOnly} 个`, result.recent && `24 小时内新增或重新选用 ${result.recent} 个`].filter(Boolean);
+      status.textContent = (result.files.length ? `图片 ${images} 张，音乐 ${music} 首，共 ${sizeLabel(result.bytes)}。` : "没有可移入暂存区的素材。") +
+        (held.length ? `已保留：${held.join("、")}。` : "");
+      list.innerHTML = result.files.map(file => `<li><code>${esc(file.kind)}/${esc(file.name)}</code><span>${sizeLabel(file.bytes)}</span></li>`).join("");
+      details.hidden = !result.files.length;
+      details.open = false;
+    }
+    busy(false);
+  };
+  stage.onclick = async () => {
+    if (!preview?.files.length || !confirm(`将这 ${preview.files.length} 个文件移入素材暂存区？文件不会被删除。`)) return;
+    busy(true);
+    status.textContent = "正在移入暂存区…";
+    const result = await api("/api/media-cleanup/stage", { method: "POST", body: { token: preview.token } });
+    preview = null;
+    details.hidden = true;
+    if (!result.ok) status.textContent = result.error || "未能移入暂存区，请重新检查";
+    else {
+      folder.textContent = result.folder;
+      status.textContent = `已移入 ${result.moved} 个文件（${sizeLabel(result.bytes)}）。` + (result.skipped.length ? `有 ${result.skipped.length} 个文件未移动，可重新检查。` : "");
+    }
+    busy(false);
+  };
+}
+
 function openSettings() {
   if (!modalIsOpen("#settingsModal")) rememberOverlayFocus();
   const st = S.settings || {};
@@ -2258,6 +2276,10 @@ function openSettings() {
     <div class="option-line" style="margin-bottom:16px">
       <span class="opt-label">主题</span>
       <div class="seg" id="setThemeSeg"><button data-v="stage">展厅（默认）</button><button data-v="shelf">书架</button></div>
+    </div>
+    <div class="option-line" style="margin-bottom:16px">
+      <label class="opt-label" for="setUiScale">界面缩放</label>
+      <select id="setUiScale" class="mini">${["100", "115", "130", "150"].map(value => `<option value="${value}"${value === APPEARANCE.scale ? " selected" : ""}>${value}%${value === "100" ? "（默认）" : ""}</option>`).join("")}</select>
     </div>
     <div class="form-item" style="margin-bottom:14px">
       <label>代理设置（Bangumi、AniList 需要）</label>
@@ -2293,6 +2315,16 @@ function openSettings() {
       <button class="btn btn-primary btn-sm" id="recImport">开始导入</button>
     </div>
     <div class="backup-list" id="backupList"></div>
+    <div class="section-head" style="margin-top:22px"><h3>素材清理</h3><div class="line"></div></div>
+    <div class="media-cleanup">
+      <div class="media-cleanup-actions">
+        <button type="button" class="btn" id="mediaScan">检查闲置素材</button>
+        <button type="button" class="btn" id="mediaStage" disabled>移入暂存区</button>
+      </div>
+      <p class="tip" id="mediaStatus" role="status"></p>
+      <details id="mediaDetails" hidden><summary>候选文件</summary><ul id="mediaFiles"></ul></details>
+      <p class="tip">位置：<code id="mediaFolder">data/素材暂存区</code></p>
+    </div>
     <div class="section-head" style="margin-top:22px"><h3>清空数据</h3><div class="line"></div></div>
     <div class="danger-box">
       <div class="tip">准备把项目传到 GitHub 时用。执行前会先把整库和全部封面打包到 <b>娱乐档案_备份\清空前全量备份_日期.zip</b>（在项目目录之外），然后清空作品、系列、封面缓存与项目内快照；代理设置、备份份数保留。</div>
@@ -2304,6 +2336,7 @@ function openSettings() {
   setModalState("#settingsModal", true);
   applyAppearance(false);
   focusAfterRender("#settingsClose");
+  bindMediaCleanup();
   el("#setModeSeg").onclick = (e) => {
     const b = e.target.closest("button[data-v]");
     if (b) setMode(b.dataset.v);
@@ -2311,6 +2344,10 @@ function openSettings() {
   el("#setThemeSeg").onclick = (e) => {
     const b = e.target.closest("button[data-v]");
     if (b) setTheme(b.dataset.v);
+  };
+  el("#setUiScale").onchange = event => {
+    APPEARANCE.scale = event.target.value;
+    applyAppearance();
   };
   el("#wipeAll").onclick = async () => {
     if (!confirm("会清空全部作品、经历、评分、系列和封面缓存，确定继续？")) return;
@@ -2413,7 +2450,11 @@ function bindGlobal() {
      if (await reloadAll()) { if (S.currentSeriesId) renderSeriesDrawer(); toast("数据已同步"); }
     } finally { btn.disabled = false; }
   };
-  el("#searchInput").oninput = (e) => { S.filters.q = e.target.value; renderWall(); };
+  el("#searchInput").oninput = (e) => {
+    S.filters.q = e.target.value;
+    if (S.filters.q.trim() && S.view !== "archive") setAppView("archive");
+    renderWall();
+  };
   elAll("#sortSelect").forEach(s => s.onchange = (e) => { S.filters.sort = e.target.value; renderWall(); });
   elAll("#timeSelect").forEach(s => s.onchange = (e) => { S.filters.time = e.target.value; renderWall(); });
   el("#addBtn").onclick = openAdd;
@@ -2466,8 +2507,8 @@ function bindGlobal() {
   el("#undoBtn").onclick = doUndo;
   el("#modeBtn").onclick = () => setMode(APPEARANCE.mode === "dark" ? "light" : "dark");
   el("#themeBtn").onclick = () => setTheme(APPEARANCE.theme === "stage" ? "shelf" : "stage");
-  el("#navHome").onclick = () => setAppView("home");
-  el("#navArchive").onclick = () => setAppView("archive");
+  elAll("[data-app-nav]").forEach(button => button.onclick = () => setAppView(button.dataset.appNav));
+  ArchiveV2.collection?.bind();
   el("#sidebarToggle").onclick = toggleSidebar;
   window.matchMedia("(max-width: 900px)").addEventListener("change", closeSidebar);
   el("#sidebarScrim").onclick = closeSidebar;
@@ -2476,14 +2517,6 @@ function bindGlobal() {
   el("#hiddenWorksCancel").onclick = closeHomeManager;
   el("#hiddenWorksSave").onclick = saveHomeManager;
   el("#hiddenWorksModal").onclick = event => { if (event.target.id === "hiddenWorksModal") closeHomeManager(); };
-  elAll("#groupSeg button").forEach(b => {
-    b.setAttribute("aria-pressed", b.classList.contains("on"));
-    b.onclick = () => {
-      S.filters.group = b.dataset.group;
-      elAll("#groupSeg button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
-      renderWall();
-    };
-  });
   elAll("#sizeSeg button").forEach(b => b.onclick = () => setSize(b.dataset.size));
   el("#newSeriesBtn").onclick = () => openSeriesModal();
   el("#enterExhibit").onclick = () => openImmersive(null, "fullscreen");
@@ -2535,7 +2568,7 @@ function bindGlobal() {
       doUndo();
       return;
     }
-    if (e.key === "/" && S.view === "archive" && !activeOverlayRoot() && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+    if (e.key === "/" && !activeOverlayRoot() && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault(); el("#searchInput").focus();
     }
   });

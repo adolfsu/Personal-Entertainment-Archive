@@ -1,0 +1,6 @@
+$:
+  vscode:
+    - runner:
+        cpus: 1
+      services:
+        - vscode

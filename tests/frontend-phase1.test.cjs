@@ -26,6 +26,8 @@ function app(fetch) {
   vm.runInContext(fs.readFileSync(path.join(root, 'web/presentation-core.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'web/exhibit-cards.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'web/immersive-audio.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'web/home-feed.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'web/collection.js'), 'utf8'), context);
   const source = fs.readFileSync(path.join(root, 'web/app.js'), 'utf8');
   vm.runInContext(source.replace(/applyAppearance\(false\);\s*boot\(\);\s*$/, ''), context);
   vm.runInContext('renderTabs=()=>{};renderStatusChips=()=>{};renderStats=()=>{};', context);
@@ -108,14 +110,12 @@ test('malformed snapshot preserves the previous complete state', async () => {
   assert.equal(a.run('S.series[0].id'), 'old-series');
 });
 
-test('an empty library can show empty series, but active filters do not leak them', () => {
+test('the library defaults to flat works and empty series remain accessible in the series view', () => {
   const a = app(async () => response({}));
   a.run('S.series=[{id:"empty",name:"空系列",memberCount:0,members:[],catMix:[],baseStatus:"not_started",baseStatusLabel:"未开始"}];renderWall()');
-  assert.match(a.elements.get('#wall').innerHTML, /data-sid="empty"/);
-  a.run('S.filters.time="y";renderWall()');
   assert.doesNotMatch(a.elements.get('#wall').innerHTML, /data-sid="empty"/);
-  a.run('S.filters.time="all";S.filters.group="flat";renderWall()');
-  assert.doesNotMatch(a.elements.get('#wall').innerHTML, /data-sid="empty"/);
+  a.run('ArchiveV2.collection.render("series")');
+  assert.match(a.elements.get('#seriesCollection').innerHTML, /data-collection-series="empty"/);
 });
 
 test('work entries on both home and archive open immersive browsing', () => {

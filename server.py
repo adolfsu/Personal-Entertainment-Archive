@@ -18,6 +18,7 @@ import mimetypes
 import os
 import re
 import socket
+import stat
 import struct
 import threading
 import time
@@ -84,6 +85,8 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 SIBLING_BACKUP_DIR = os.path.join(os.path.dirname(BASE_DIR), "娱乐档案_备份")
 LIB_PATH = os.path.join(DATA_DIR, "library.json")
 IMAGE_CACHE_DIR = os.path.join(DATA_DIR, "image_cache")
+MEDIA_STAGING_DIR = os.path.join(DATA_DIR, "素材暂存区")
+MEDIA_GRACE_SECONDS = 24 * 60 * 60
 LIB_VERSION = 2
 DAILY_KEEP = 15
 PORT = int(os.environ.get("GRDAG_PORT", "8777"))
@@ -2317,6 +2320,27 @@ def save_immersive_image(value):
         path = os.path.join(COVER_DIR, name)
         if not os.path.exists(path):
             atomic_write_bytes(path, raw)
+        else:
+            os.utime(path, None)
+    return {"url": "/covers/" + name, "width": size[0], "height": size[1], "bytes": len(raw)}
+
+
+def save_uploaded_immersive_image(raw):
+    """Validate and save a locally selected or pasted image without trusting its filename or MIME type."""
+    if not raw or len(raw) > BACKGROUND_IMAGE_LIMIT:
+        raise ValueError("沉浸图片为空或超过 20 MB")
+    size = _image_size(raw)
+    if not size:
+        raise ValueError("文件不是有效的 PNG、JPEG、WebP 或 GIF 图片")
+    name = "background_" + hashlib.sha256(raw).hexdigest() + _image_ext(raw, "")
+    with _lock:
+        load_library()
+        ensure_dirs()
+        path = os.path.join(COVER_DIR, name)
+        if not os.path.exists(path):
+            atomic_write_bytes(path, raw)
+        else:
+            os.utime(path, None)
     return {"url": "/covers/" + name, "width": size[0], "height": size[1], "bytes": len(raw)}
 
 
@@ -2337,6 +2361,119 @@ def add_images_to_zip(archive, lib):
         path = os.path.join(COVER_DIR, os.path.basename(relative))
         if os.path.isfile(path):
             archive.write(path, relative)
+
+
+def media_references(lib):
+    """Track both formats of the background field, including older snapshots."""
+    paths = set()
+    for item in lib.get("works", []) + lib.get("series", []):
+        if not isinstance(item, dict):
+            continue
+        values = [item.get("cover"), item.get("immersiveBackgroundUrl")]
+        if isinstance(item.get("immersiveBackgroundUrls"), list):
+            values.extend(item["immersiveBackgroundUrls"])
+        if isinstance(item.get("bgm"), dict):
+            values.append(item["bgm"].get("src"))
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            path = unquote(urlparse(value.strip()).path).lstrip("/").lower()
+            if re.fullmatch(r"(?:covers|audio)/[^/\\]+", path):
+                paths.add(path)
+    return paths
+
+
+def media_directory(path):
+    """Never scan or stage through a symbolic link or Windows junction."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise ValueError(f"无法安全使用目录：{os.path.basename(path)}")
+    return True
+
+
+def scan_unused_media():
+    # The settings list is capped; all restorable snapshots must protect their media.
+    try:
+        with open(LIB_PATH, "r", encoding="utf-8") as f:
+            lib = json.load(f)
+        check_library(lib)
+        active = media_references(lib)
+    except (OSError, ValueError):
+        raise ValueError("无法检查主档案，未移动任何文件") from None
+    backups = set()
+    for folder, label in BACKUP_KINDS.values():
+        if not media_directory(folder):
+            continue
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json") or not entry.is_file():
+                    continue
+                try:
+                    with open(entry.path, "r", encoding="utf-8") as f:
+                        lib = json.load(f)
+                    check_library(lib)
+                    backups.update(media_references(lib))
+                except (OSError, ValueError):
+                    raise ValueError(f"无法检查{label}「{entry.name}」，未移动任何文件") from None
+    candidates = []
+    counts = {"backupOnly": 0, "recent": 0}
+    cutoff = time.time() - MEDIA_GRACE_SECONDS
+    for kind, folder, pattern in (
+        ("covers", COVER_DIR, r"(?:[0-9a-f]{16}|background_[0-9a-f]{64})\.(?:jpe?g|png|webp|gif)"),
+        ("audio", AUDIO_DIR, r"[0-9a-f]{64}\.mp3"),
+    ):
+        if not media_directory(folder):
+            continue
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if not re.fullmatch(pattern, entry.name, re.IGNORECASE):
+                    continue
+                info = os.lstat(entry.path)
+                if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    continue
+                key = f"{kind}/{entry.name.lower()}"
+                if key in active:
+                    continue
+                if key in backups:
+                    counts["backupOnly"] += 1
+                elif info.st_mtime > cutoff:
+                    counts["recent"] += 1
+                else:
+                    candidates.append((kind, entry.name, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino))
+    candidates.sort()
+    token = hashlib.sha256(json.dumps(candidates).encode("ascii")).hexdigest()
+    return candidates, counts, token
+
+
+def stage_unused_media(candidates):
+    # A new batch keeps filenames and provenance without overwriting earlier batches.
+    if not media_directory(MEDIA_STAGING_DIR):
+        os.mkdir(MEDIA_STAGING_DIR)
+    batch = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    dest = os.path.join(MEDIA_STAGING_DIR, batch)
+    os.mkdir(dest)
+    folders = {"covers": COVER_DIR, "audio": AUDIO_DIR}
+    for kind in {row[0] for row in candidates}:
+        os.mkdir(os.path.join(dest, kind))
+    moved = size = 0
+    skipped = []
+    for kind, name, length, mtime, ctime, inode in candidates:
+        source = os.path.join(folders[kind], name)
+        try:
+            info = os.lstat(source)
+            actual = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+            if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400 or actual != (length, mtime, ctime, inode):
+                skipped.append(name)
+                continue
+            os.rename(source, os.path.join(dest, kind, name))
+            moved += 1
+            size += length
+        except OSError:
+            skipped.append(name)
+    return {"moved": moved, "bytes": size, "skipped": skipped, "folder": dest}
 
 
 def apply_immersive_background(target, payload):
@@ -3561,11 +3698,15 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         if len(raw) != length or not is_mp3(raw):
             return self.send_json({"ok": False, "error": "没有识别到有效的 MP3 音频，请重新选择文件"}, 400)
-        ensure_dirs()
         name = hashlib.sha256(raw).hexdigest() + ".mp3"
         path = os.path.join(AUDIO_DIR, name)
-        if not os.path.exists(path):
-            atomic_write_bytes(path, raw)
+        with _lock:
+            load_library()
+            ensure_dirs()
+            if not os.path.exists(path):
+                atomic_write_bytes(path, raw)
+            else:
+                os.utime(path, None)
         title = unquote(self.headers.get("X-Audio-Name", "背景音乐"))[:200]
         return self.send_json({"ok": True, "bgm": {"src": "/audio/" + name, "title": title, "artist": ""}, "bytes": length})
 
@@ -3635,6 +3776,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_template()
             if p == "/api/backups":
                 return self.send_json({"ok": True, "backups": list_backups()})
+            if p == "/api/media-cleanup":
+                return self.handle_media_cleanup()
             self._send(404, json.dumps({"ok": False, "error": "not found"}), "application/json")
         except LibraryCorrupt as e:
             log_event("http", "GET " + p, "corrupt", f"{e.reason} {e.detail}", logging.ERROR)
@@ -3650,6 +3793,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if p == "/api/audio":
                 return self.handle_audio_upload()
+            if p == "/api/backgrounds/local":
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0 or length > BACKGROUND_IMAGE_LIMIT:
+                    return self.send_json({"ok": False, "error": "沉浸图片为空或超过 20 MB"}, 400)
+                with _lock:
+                    load_library()
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    return self.send_json({"ok": False, "error": "图片上传不完整，请重试"}, 400)
+                return self.send_json({"ok": True, "image": save_uploaded_immersive_image(raw)})
             body = self.read_body()
             if p == "/api/backgrounds":
                 with _lock:
@@ -3677,19 +3830,27 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/import-records":
                 return self.handle_import_records(body)
             if p == "/api/import":
-                return self.handle_import(body)
+                with _lock:
+                    return self.handle_import(body)
             if p == "/api/clear-data":
                 return self.handle_clear_data(body)
             if p == "/api/settings":
                 return self.handle_settings(body)
+            if p == "/api/media-cleanup/stage":
+                if not isinstance(body, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(body.get("token") or "")):
+                    return self.send_json({"ok": False, "error": "请先检查闲置素材"}, 400)
+                return self.handle_media_cleanup(body["token"])
             if p == "/api/backups/restore":
-                return self.handle_restore(body)
+                with _lock:
+                    return self.handle_restore(body)
             if p == "/api/backups/preview":
                 return self.handle_backup_preview(body)
             if p == "/api/recover/new-start":
-                return self.handle_recover_new_start(body)
+                with _lock:
+                    return self.handle_recover_new_start(body)
             if p == "/api/undo":
-                return self.handle_undo(body)
+                with _lock:
+                    return self.handle_undo(body)
             if p == "/api/proxy/check":
                 val = resolve_proxy(force=True)
                 return self.send_json({"ok": True, "proxy": val, "state": "连通" if val else "未探测到可用代理"})
@@ -4326,27 +4487,26 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(item, dict):
                 raise ValueError("备份条目格式不正确")
             apply_bgm(item, item)
-        with _lock:
-            lib = load_library()
-            if mode == "replace":
-                lib["works"] = incoming
-                lib["series"] = incoming_series
-            else:
-                existing = {w["id"]: w for w in lib["works"]}
-                for w in incoming:
-                    wid = w.get("id") or new_id("w_")
-                    w["id"] = wid
-                    existing[wid] = w
-                lib["works"] = list(existing.values())
-                s_existing = {s["id"]: s for s in lib.get("series", []) if s.get("id")}
-                for s in incoming_series:
-                    sid = s.get("id") or new_id("s_")
-                    s["id"] = sid
-                    s_existing[sid] = s
-                lib["series"] = list(s_existing.values())
-            if isinstance(data.get("settings"), dict):
-                lib["settings"].update({k: v for k, v in data["settings"].items() if k != "deepseek_key"})
-            save_library(lib)
+        lib = load_library()
+        if mode == "replace":
+            lib["works"] = incoming
+            lib["series"] = incoming_series
+        else:
+            existing = {w["id"]: w for w in lib["works"]}
+            for w in incoming:
+                wid = w.get("id") or new_id("w_")
+                w["id"] = wid
+                existing[wid] = w
+            lib["works"] = list(existing.values())
+            s_existing = {s["id"]: s for s in lib.get("series", []) if s.get("id")}
+            for s in incoming_series:
+                sid = s.get("id") or new_id("s_")
+                s["id"] = sid
+                s_existing[sid] = s
+            lib["series"] = list(s_existing.values())
+        if isinstance(data.get("settings"), dict):
+            lib["settings"].update({k: v for k, v in data["settings"].items() if k != "deepseek_key"})
+        save_library(lib)
         audio_cnt = len(set(os.listdir(AUDIO_DIR)) - audio_before) if os.path.isdir(AUDIO_DIR) else 0
         return self.send_json({"ok": True, "count": len(lib["works"]), "covers": cover_cnt, "audio": audio_cnt})
 
@@ -4391,6 +4551,22 @@ class Handler(BaseHTTPRequestHandler):
                     os.remove(fp)
                     cleared["backups"] += 1
         return self.send_json({"ok": True, "backup": name, "backup_path": path, "cleared": cleared})
+
+    def handle_media_cleanup(self, expected_token=None):
+        with _lock:
+            try:
+                candidates, counts, token = scan_unused_media()
+                if expected_token is None:
+                    files = [{"kind": kind, "name": name, "bytes": size}
+                             for kind, name, size, *_ in candidates]
+                    return self.send_json({"ok": True, "files": files, "bytes": sum(f["bytes"] for f in files),
+                                           "folder": MEDIA_STAGING_DIR, "token": token, **counts})
+                if token != expected_token or not candidates:
+                    return self.send_json({"ok": False, "error": "候选素材已变化，请重新检查"}, 409)
+                result = stage_unused_media(candidates)
+            except (OSError, ValueError) as e:
+                return self.send_json({"ok": False, "error": str(e)}, 409)
+        return self.send_json({"ok": True, **result})
 
     def handle_settings(self, body):
         with _lock:

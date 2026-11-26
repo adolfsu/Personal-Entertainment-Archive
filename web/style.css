@@ -1061,6 +1061,12 @@ html[data-mode="light"] .modal-box{
 
 /* 设置行 */
 .option-line{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px}
+.media-cleanup-actions{display:flex;flex-wrap:wrap;gap:8px}
+.media-cleanup code{overflow-wrap:anywhere}
+.media-cleanup summary{cursor:pointer;font-size:12px}
+.media-cleanup ul{margin:6px 0;padding:0;list-style:none;max-height:190px;overflow:auto}
+.media-cleanup li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:8px;padding:5px 0;border-bottom:1px solid var(--lenso-separator);font-size:11px}
+.media-cleanup li>span{white-space:nowrap}
 .opt-label{font-size:13px;color:var(--lenso-label-primary);font-weight:500}
 .backup-list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
 .backup-row{

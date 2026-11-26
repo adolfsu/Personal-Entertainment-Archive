@@ -15,7 +15,7 @@
   function workCard(work, labels) {
     const rating = score(work.rating);
     const metadata = [labels.category, work.year].filter(Boolean).join(" · ");
-    return `<article class="card exhibit-work" data-id="${escape(work.id)}" data-cat="${escape(work.category)}" role="group" aria-label="查看《${escape(work.title)}》完整详情，${escape(labels.status)}，${rating === null ? "未评分" : `个人评分 ${rating}`}" title="${escape(work.title)}">
+    return `<article class="card exhibit-work" data-id="${escape(work.id)}" data-cat="${escape(work.category)}" tabindex="0" role="button" aria-label="查看《${escape(work.title)}》完整详情，${escape(labels.status)}，${rating === null ? "未评分" : `个人评分 ${rating}`}" title="${escape(work.title)}">
       <div class="exhibit-cover">
         <div class="exhibit-placeholder" aria-hidden="true"><span class="exhibit-placeholder-label">${escape(labels.category)}</span><span class="exhibit-placeholder-note">暂无封面</span></div>
         ${image(work.coverUrl)}
