@@ -46,6 +46,42 @@ class TestUpdateRelease(unittest.TestCase):
         self.assertFalse((self.base / "unpack").exists())
         self.assertFalse(updater.is_safe_download("https://example.com/package"))
 
+    def test_falls_back_to_cnb_mirror_when_github_unreachable(self):
+        payload = json.dumps({"format": 1, "version": "1.10.1", "archiveSchema": 2,
+                              "bytes": 10, "sha256": "a" * 64, "notes": "n"}).encode()
+        opened = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self, _size):
+                return payload
+
+        def fake_open(url, hosts=updater.GITHUB_HOSTS):
+            opened.append(url)
+            if "github.com" in url:
+                raise updater.URLError("blocked")
+            return FakeResponse()
+
+        with patch.object(updater, "open_release", side_effect=fake_open):
+            release = updater.fetch_release()
+        self.assertEqual(release["source"], "CNB")
+        self.assertEqual(release["version"], "1.10.1")
+        self.assertTrue(opened[0].startswith(updater.GITHUB))
+        self.assertTrue(opened[1].startswith(updater.CNB))
+        self.assertEqual(updater.release_source(release)[0], updater.CNB)
+        self.assertFalse(updater.is_safe_download("https://cnb.cool.example.com/package", updater.CNB_HOSTS))
+
+        def not_found(url, hosts=updater.GITHUB_HOSTS):
+            raise updater.HTTPError(url, 404, "Not Found", None, None)
+
+        with patch.object(updater, "open_release", side_effect=not_found):
+            self.assertIsNone(updater.fetch_release())
+
     def test_failed_start_restores_program_and_preserves_data(self):
         work = self.base / ".pea-updates/fixture"
         new = work / "new"

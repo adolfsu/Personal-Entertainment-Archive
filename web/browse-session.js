@@ -4,7 +4,7 @@
     create(ids, currentId, surface = "overlay") {
       const sequence = [...new Set(ids)];
       if (!sequence.includes(currentId)) return null;
-      return { ids: sequence, currentId, surface: surface === "fullscreen" ? "fullscreen" : "overlay" };
+      return { ids: sequence, currentId, page: "work", surface: surface === "fullscreen" ? "fullscreen" : "overlay" };
     },
     adjacent(session, offset) {
       return session.ids[session.ids.indexOf(session.currentId) + offset] || null;

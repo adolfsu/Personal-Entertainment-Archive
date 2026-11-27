@@ -88,6 +88,7 @@ SIBLING_BACKUP_DIR = os.path.join(os.path.dirname(BASE_DIR), "娱乐档案_备�
 LIB_PATH = os.path.join(DATA_DIR, "library.json")
 IMAGE_CACHE_DIR = os.path.join(DATA_DIR, "image_cache")
 MEDIA_STAGING_DIR = os.path.join(DATA_DIR, "素材暂存区")
+MEDIA_LAYOUT_PATH = os.path.join(DATA_DIR, "media-layout")
 MEDIA_GRACE_SECONDS = 24 * 60 * 60
 LIB_VERSION = 2
 DAILY_KEEP = 15
@@ -331,6 +332,7 @@ def parse_records(text):
     return list(groups.values())
 
 _lock = threading.Lock()
+_media_lock = threading.RLock()
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -514,6 +516,14 @@ def write_library(lib):
     ensure_dirs()
     raw = json.dumps(lib, ensure_ascii=False, indent=1).encode("utf-8")
     atomic_write_bytes(LIB_PATH, raw)
+    if os.path.isfile(MEDIA_LAYOUT_PATH):
+        try:
+            with _media_lock:
+                result = relocate_media(media_relocation_plan(lib))
+            if result["skipped"]:
+                log_event("media", "organize", "partial", f"skipped={len(result['skipped'])}", logging.WARNING)
+        except (OSError, ValueError) as e:
+            log_event("media", "organize", "fail", str(e), logging.WARNING)
 
 
 def save_library(lib, snapshot=True):
@@ -700,19 +710,11 @@ def extract_library_zip(raw):
             base = os.path.basename(norm)
             if not base or base in (".", "..") or "/" in base:
                 continue
-            dst = os.path.join(COVER_DIR, base)
-            if os.path.exists(dst):
-                continue
             payload = z.read(n)
-            if not payload:
-                continue
-            with open(dst, "wb") as f:
-                f.write(payload)
-            restored += 1
+            if payload:
+                restored += store_media("covers", base, payload)
         for name, payload in audio_files.items():
-            dst = os.path.join(AUDIO_DIR, name)
-            if not os.path.exists(dst):
-                atomic_write_bytes(dst, payload)
+            store_media("audio", name, payload)
     return data, restored
 
 
@@ -990,8 +992,7 @@ def save_cover(url, referer=None, proxy=False, timeout=10):
     name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ext
     ensure_dirs()
     try:
-        with open(os.path.join(COVER_DIR, name), "wb") as f:
-            f.write(body)
+        store_media("covers", name, body, replace=True)
     except Exception:
         return None
     return "covers/" + name
@@ -2319,11 +2320,7 @@ def save_immersive_image(value):
     with _lock:
         load_library()  # 下载期间档案损坏时也不能继续写入资源。
         ensure_dirs()
-        path = os.path.join(COVER_DIR, name)
-        if not os.path.exists(path):
-            atomic_write_bytes(path, raw)
-        else:
-            os.utime(path, None)
+        store_media("covers", name, raw, touch=True)
     return {"url": "/covers/" + name, "width": size[0], "height": size[1], "bytes": len(raw)}
 
 
@@ -2338,11 +2335,7 @@ def save_uploaded_immersive_image(raw):
     with _lock:
         load_library()
         ensure_dirs()
-        path = os.path.join(COVER_DIR, name)
-        if not os.path.exists(path):
-            atomic_write_bytes(path, raw)
-        else:
-            os.utime(path, None)
+        store_media("covers", name, raw, touch=True)
     return {"url": "/covers/" + name, "width": size[0], "height": size[1], "bytes": len(raw)}
 
 
@@ -2360,29 +2353,36 @@ def add_images_to_zip(archive, lib):
             if isinstance(value, str) and re.fullmatch(r"/?covers/[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)", value):
                 paths.add(value.lstrip("/"))
     for relative in sorted(paths):
-        path = os.path.join(COVER_DIR, os.path.basename(relative))
-        if os.path.isfile(path):
+        path = find_media("covers", os.path.basename(relative))
+        if path:
             archive.write(path, relative)
 
 
-def media_references(lib):
-    """Track both formats of the background field, including older snapshots."""
+def item_media_references(item):
     paths = set()
-    for item in lib.get("works", []) + lib.get("series", []):
-        if not isinstance(item, dict):
+    if not isinstance(item, dict):
+        return paths
+    values = [item.get("cover"), item.get("immersiveBackgroundUrl")]
+    if isinstance(item.get("immersiveBackgroundUrls"), list):
+        values.extend(item["immersiveBackgroundUrls"])
+    if isinstance(item.get("bgm"), dict):
+        values.append(item["bgm"].get("src"))
+    for value in values:
+        if not isinstance(value, str):
             continue
-        values = [item.get("cover"), item.get("immersiveBackgroundUrl")]
-        if isinstance(item.get("immersiveBackgroundUrls"), list):
-            values.extend(item["immersiveBackgroundUrls"])
-        if isinstance(item.get("bgm"), dict):
-            values.append(item["bgm"].get("src"))
-        for value in values:
-            if not isinstance(value, str):
-                continue
-            path = unquote(urlparse(value.strip()).path).lstrip("/").lower()
-            if re.fullmatch(r"(?:covers|audio)/[^/\\]+", path):
-                paths.add(path)
+        try:
+            url = urlparse(value.strip())
+        except ValueError:
+            continue
+        path = unquote(url.path).lstrip("/")
+        if not url.scheme and not url.netloc and re.fullmatch(r"(?:covers|audio)/[^/\\]+", path):
+            paths.add(path)
     return paths
+
+
+def media_references(lib):
+    return {key.lower() for item in lib.get("works", []) + lib.get("series", [])
+            for key in item_media_references(item)}
 
 
 def media_directory(path):
@@ -2394,6 +2394,155 @@ def media_directory(path):
     if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
         raise ValueError(f"无法安全使用目录：{os.path.basename(path)}")
     return True
+
+
+MEDIA_ROOTS = {"covers": COVER_DIR, "audio": AUDIO_DIR}
+MEDIA_CATEGORIES = (*CATEGORIES, "shared", "series")
+MANAGED_MEDIA = {
+    "covers": r"(?:[0-9a-f]{16}|background_[0-9a-f]{64})\.(?:jpe?g|png|webp|gif)",
+    "audio": r"[0-9a-f]{64}\.mp3",
+}
+
+
+def media_filename(name):
+    return bool(name and name not in (".", "..") and not re.search(r'[/\\:\x00-\x1f]', name)
+                and not name.endswith((".", " ")))
+
+
+def media_file_info(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400:
+        return info
+    return None
+
+
+def find_media(kind, name):
+    if not media_filename(name):
+        return None
+    root = MEDIA_ROOTS[kind]
+    for bucket in ("", *MEDIA_CATEGORIES):
+        folder = os.path.join(root, bucket) if bucket else root
+        try:
+            if not media_directory(folder):
+                continue
+        except ValueError:
+            if not bucket:
+                raise
+            continue
+        path = os.path.join(folder, name)
+        if media_file_info(path):
+            return path
+    return None
+
+
+def iter_media(kind):
+    root = MEDIA_ROOTS[kind]
+    if not media_directory(root):
+        return
+    for bucket in ("", *MEDIA_CATEGORIES):
+        folder = os.path.join(root, bucket) if bucket else root
+        try:
+            if not media_directory(folder):
+                continue
+        except ValueError:
+            continue
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if media_filename(entry.name) and (info := media_file_info(entry.path)):
+                    yield bucket, entry.name, entry.path, info
+
+
+def store_media(kind, name, raw, *, replace=False, touch=False):
+    if not media_filename(name):
+        raise ValueError("素材文件名不合法")
+    with _media_lock:
+        existing = find_media(kind, name)
+        if not existing or replace:
+            path = existing or os.path.join(MEDIA_ROOTS[kind], name)
+            if not existing and os.path.lexists(path):
+                raise ValueError("素材位置已被占用")
+            atomic_write_bytes(path, raw)
+        elif touch:
+            os.utime(existing, None)
+        return existing is None
+
+
+def media_relocation_plan(lib):
+    owners = {}
+    series_categories = {}
+    for work in lib.get("works", []):
+        if not isinstance(work, dict):
+            continue
+        category = work.get("category")
+        if not isinstance(category, str) or category not in CATEGORIES:
+            category = "shared"
+        for key in item_media_references(work):
+            owners.setdefault(os.path.normcase(key).replace("\\", "/"), set()).add(category)
+        for link in work.get("seriesLinks") or []:
+            if isinstance(link, dict) and isinstance(link.get("id"), str):
+                series_categories.setdefault(link["id"], set()).add(category)
+    for series in lib.get("series", []):
+        if not isinstance(series, dict):
+            continue
+        categories = series_categories.get(series.get("id")) or {"series"}
+        for key in item_media_references(series):
+            owners.setdefault(os.path.normcase(key).replace("\\", "/"), set()).update(categories)
+    plan = []
+    missing = []
+    for key, categories in sorted(owners.items()):
+        kind, name = key.split("/", 1)
+        bucket = next(iter(categories)) if len(categories) == 1 else "shared"
+        source = find_media(kind, name)
+        if source is None:
+            missing.append(key)
+            continue
+        target = os.path.join(MEDIA_ROOTS[kind], bucket, name)
+        if os.path.normcase(source) != os.path.normcase(target):
+            plan.append((kind, name, source, target))
+    return plan, missing
+
+
+def relocate_media(plan_result):
+    plan, missing = plan_result
+    result = {"covers": 0, "audio": 0, "missing": missing, "skipped": []}
+    for kind, name, source, target in plan:
+        try:
+            folder = os.path.dirname(target)
+            if not media_directory(folder):
+                os.mkdir(folder)
+            if os.path.lexists(target):
+                raise ValueError("目标素材已存在")
+            # Same-volume rename keeps the original file intact if the move fails.
+            os.rename(source, target)
+            result[kind] += 1
+        except (OSError, ValueError):
+            result["skipped"].append(f"{kind}/{name}")
+    return result
+
+
+def backup_media_layout(plan):
+    folder = os.path.join(BACKUP_DIR, "media-layout")
+    if not media_directory(folder):
+        os.mkdir(folder)
+    name = f"素材整理前_{datetime.now():%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:8]}.zip"
+    path = os.path.join(folder, name)
+    pending = path + ".tmp"
+    try:
+        with zipfile.ZipFile(pending, "x", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            archive.write(LIB_PATH, "library.json")
+            for kind, filename, source, _ in plan:
+                archive.write(source, f"{kind}/{filename}")
+        with zipfile.ZipFile(pending) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("素材备份校验失败")
+        os.rename(pending, path)
+    finally:
+        if os.path.exists(pending):
+            os.remove(pending)
+    return path
 
 
 def scan_unused_media():
@@ -2423,28 +2572,19 @@ def scan_unused_media():
     candidates = []
     counts = {"backupOnly": 0, "recent": 0}
     cutoff = time.time() - MEDIA_GRACE_SECONDS
-    for kind, folder, pattern in (
-        ("covers", COVER_DIR, r"(?:[0-9a-f]{16}|background_[0-9a-f]{64})\.(?:jpe?g|png|webp|gif)"),
-        ("audio", AUDIO_DIR, r"[0-9a-f]{64}\.mp3"),
-    ):
-        if not media_directory(folder):
-            continue
-        with os.scandir(folder) as entries:
-            for entry in entries:
-                if not re.fullmatch(pattern, entry.name, re.IGNORECASE):
-                    continue
-                info = os.lstat(entry.path)
-                if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                    continue
-                key = f"{kind}/{entry.name.lower()}"
-                if key in active:
-                    continue
-                if key in backups:
-                    counts["backupOnly"] += 1
-                elif info.st_mtime > cutoff:
-                    counts["recent"] += 1
-                else:
-                    candidates.append((kind, entry.name, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino))
+    for kind, pattern in MANAGED_MEDIA.items():
+        for bucket, name, _, info in iter_media(kind):
+            if not re.fullmatch(pattern, name, re.IGNORECASE):
+                continue
+            key = f"{kind}/{name.lower()}"
+            if key in active:
+                continue
+            if key in backups:
+                counts["backupOnly"] += 1
+            elif info.st_mtime > cutoff:
+                counts["recent"] += 1
+            else:
+                candidates.append((kind, name, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, bucket))
     candidates.sort()
     token = hashlib.sha256(json.dumps(candidates).encode("ascii")).hexdigest()
     return candidates, counts, token
@@ -2457,20 +2597,19 @@ def stage_unused_media(candidates):
     batch = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     dest = os.path.join(MEDIA_STAGING_DIR, batch)
     os.mkdir(dest)
-    folders = {"covers": COVER_DIR, "audio": AUDIO_DIR}
-    for kind in {row[0] for row in candidates}:
-        os.mkdir(os.path.join(dest, kind))
     moved = size = 0
     skipped = []
-    for kind, name, length, mtime, ctime, inode in candidates:
-        source = os.path.join(folders[kind], name)
+    for kind, name, length, mtime, ctime, inode, bucket in candidates:
+        source = os.path.join(MEDIA_ROOTS[kind], bucket, name)
         try:
             info = os.lstat(source)
             actual = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
             if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400 or actual != (length, mtime, ctime, inode):
                 skipped.append(name)
                 continue
-            os.rename(source, os.path.join(dest, kind, name))
+            target_folder = os.path.join(dest, kind, bucket)
+            os.makedirs(target_folder, exist_ok=True)
+            os.rename(source, os.path.join(target_folder, name))
             moved += 1
             size += length
         except OSError:
@@ -2556,14 +2695,14 @@ def is_mp3(raw):
 
 
 def add_audio_to_zip(archive, lib, all_files=False):
-    names = set(os.listdir(AUDIO_DIR)) if all_files and os.path.isdir(AUDIO_DIR) else {
+    names = {name for _, name, _, _ in iter_media("audio")} if all_files else {
         (item.get("bgm") or {}).get("src", "").rsplit("/", 1)[-1]
         for item in lib.get("works", []) + lib.get("series", [])
         if isinstance(item.get("bgm"), dict) and (item["bgm"].get("src") or "").startswith("/audio/")}
     for name in sorted(names):
         if re.fullmatch(r"[a-f0-9]{64}\.mp3", name):
-            path = os.path.join(AUDIO_DIR, name)
-            if os.path.isfile(path):
+            path = find_media("audio", name)
+            if path:
                 archive.write(path, "audio/" + name)
 
 
@@ -3653,10 +3792,16 @@ class Handler(BaseHTTPRequestHandler):
     def serve_audio(self, url, head=False):
         if not re.fullmatch(r"/audio/[a-f0-9]{64}\.mp3", url):
             return self._send(404, "not found", "text/plain")
-        path = os.path.join(AUDIO_DIR, url.rsplit("/", 1)[-1])
-        if not os.path.isfile(path):
+        with _media_lock:
+            path = find_media("audio", url.rsplit("/", 1)[-1])
+            stream = open(path, "rb") if path else None
+        if stream is None:
             return self._send(404, "not found", "text/plain")
-        size = os.path.getsize(path)
+        with stream:
+            return self.send_audio(stream, head)
+
+    def send_audio(self, audio, head):
+        size = os.fstat(audio.fileno()).st_size
         start, end, code = 0, size - 1, 200
         requested = self.headers.get("Range")
         if requested:
@@ -3682,16 +3827,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head:
             try:
-                with open(path, "rb") as audio:
-                    audio.seek(start)
-                    remaining = end - start + 1
-                    while remaining:
-                        chunk = audio.read(min(65536, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except (BrokenPipeError, ConnectionResetError):
+                audio.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = audio.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
     def do_HEAD(self):
@@ -3708,14 +3852,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(raw) != length or not is_mp3(raw):
             return self.send_json({"ok": False, "error": "没有识别到有效的 MP3 音频，请重新选择文件"}, 400)
         name = hashlib.sha256(raw).hexdigest() + ".mp3"
-        path = os.path.join(AUDIO_DIR, name)
         with _lock:
             load_library()
             ensure_dirs()
-            if not os.path.exists(path):
-                atomic_write_bytes(path, raw)
-            else:
-                os.utime(path, None)
+            store_media("audio", name, raw, touch=True)
         title = unquote(self.headers.get("X-Audio-Name", "背景音乐"))[:200]
         return self.send_json({"ok": True, "bgm": {"src": "/audio/" + name, "title": title, "artist": ""}, "bytes": length})
 
@@ -3740,7 +3880,14 @@ class Handler(BaseHTTPRequestHandler):
             if p in ("/", "/index.html"):
                 return self.serve_file(os.path.join(WEB_DIR, "index.html"))
             if p.startswith("/covers/"):
-                return self.serve_file(os.path.join(COVER_DIR, os.path.basename(p)))
+                with _media_lock:
+                    path = find_media("covers", unquote(p.removeprefix("/covers/")))
+                    if path:
+                        with open(path, "rb") as f:
+                            image = f.read()
+                if not path:
+                    return self._send(404, "not found", "text/plain; charset=utf-8")
+                return self._send(200, image, mimetypes.guess_type(path)[0] or "application/octet-stream")
             if p.startswith("/audio/"):
                 return self.serve_audio(p)
             if p.startswith("/static/"):
@@ -3877,6 +4024,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(body.get("token") or "")):
                     return self.send_json({"ok": False, "error": "请先检查闲置素材"}, 400)
                 return self.handle_media_cleanup(body["token"])
+            if p == "/api/media-organize":
+                if self.headers.get("Content-Type", "").split(";")[0] != "application/json" or body != {"organize": True}:
+                    return self.send_json({"ok": False, "error": "请从设置页启动素材整理"}, 400)
+                return self.handle_media_organize()
             if p == "/api/backups/restore":
                 with _lock:
                     return self.handle_restore(body)
@@ -4481,14 +4632,15 @@ class Handler(BaseHTTPRequestHandler):
                           {"Content-Disposition": 'attachment; filename="import_template.csv"'})
 
     def handle_export(self, with_covers):
-        lib = load_library()
         if not with_covers:
+            lib = load_library()
             payload = json.dumps(lib, ensure_ascii=False, indent=1).encode("utf-8")
             name = f"archive_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
             return self._send(200, payload, "application/json; charset=utf-8",
                               {"Content-Disposition": f'attachment; filename="{quote(name)}"'})
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        with _lock, _media_lock, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            lib = load_library()
             z.writestr("library.json", json.dumps(lib, ensure_ascii=False, indent=1))
             add_images_to_zip(z, lib)
             add_audio_to_zip(z, lib)
@@ -4500,7 +4652,7 @@ class Handler(BaseHTTPRequestHandler):
         data = body.get("data")
         mode = body.get("mode") or "merge"
         cover_cnt = 0
-        audio_before = set(os.listdir(AUDIO_DIR)) if os.path.isdir(AUDIO_DIR) else set()
+        audio_before = {name for _, name, _, _ in iter_media("audio")}
         if body.get("zip"):
             b64 = body["zip"]
             if isinstance(b64, str) and b64.startswith("data:") and "," in b64:
@@ -4550,13 +4702,18 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(data.get("settings"), dict):
             lib["settings"].update({k: v for k, v in data["settings"].items() if k != "deepseek_key"})
         save_library(lib)
-        audio_cnt = len(set(os.listdir(AUDIO_DIR)) - audio_before) if os.path.isdir(AUDIO_DIR) else 0
+        audio_cnt = len({name for _, name, _, _ in iter_media("audio")} - audio_before)
         return self.send_json({"ok": True, "count": len(lib["works"]), "covers": cover_cnt, "audio": audio_cnt})
 
     def handle_clear_data(self, body):
         """清空个人记录（作品 / 系列 / 封面 / 项目内快照），清空前先整包备份到项目外的 娱乐档案_备份。"""
         if (body.get("confirm") or "").strip() != "清空全部":
             return self.send_json({"ok": False, "error": "确认词不正确，未执行"}, 400)
+        with _lock, _media_lock:
+            result = self.clear_data()
+        return self.send_json({"ok": True, **result})
+
+    def clear_data(self):
         lib = load_library()
         ensure_dirs()
         os.makedirs(SIBLING_BACKUP_DIR, exist_ok=True)
@@ -4567,41 +4724,44 @@ class Handler(BaseHTTPRequestHandler):
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("library.json", json.dumps(lib, ensure_ascii=False, indent=1))
             add_audio_to_zip(z, lib, all_files=True)
-            add_images_to_zip(z, lib)
+            for name in sorted({name for _, name, _, _ in iter_media("covers")}):
+                z.write(find_media("covers", name), "covers/" + name)
         with open(path, "wb") as f:
             f.write(buf.getvalue())
         cleared = {"works": len(lib.get("works") or []), "series": len(lib.get("series") or []),
                    "covers": 0, "audio": 0, "backups": 0}
-        with _lock:
-            newlib = default_library()
-            for k in ("proxy", "proxy_port", "backup_keep", "immersive_background_interval", "immersive_background_order"):
-                if k in lib.get("settings", {}):
-                    newlib["settings"][k] = lib["settings"][k]
-            write_library(newlib)
-            for fn in os.listdir(AUDIO_DIR):
-                fp = os.path.join(AUDIO_DIR, fn)
-                if os.path.isfile(fp):
-                    os.remove(fp)
-                    cleared["audio"] += 1
-            for fn in os.listdir(COVER_DIR):
-                fp = os.path.join(COVER_DIR, fn)
-                if os.path.isfile(fp):
-                    os.remove(fp)
-                    cleared["covers"] += 1
-            for fn in os.listdir(BACKUP_DIR):
-                fp = os.path.join(BACKUP_DIR, fn)
-                if os.path.isfile(fp):
-                    os.remove(fp)
-                    cleared["backups"] += 1
-        return self.send_json({"ok": True, "backup": name, "backup_path": path, "cleared": cleared})
+        newlib = default_library()
+        for k in ("proxy", "proxy_port", "backup_keep", "immersive_background_interval", "immersive_background_order"):
+            if k in lib.get("settings", {}):
+                newlib["settings"][k] = lib["settings"][k]
+        write_library(newlib)
+        for kind in MEDIA_ROOTS:
+            for _, _, filename, _ in iter_media(kind):
+                os.remove(filename)
+                cleared[kind] += 1
+        for fn in os.listdir(BACKUP_DIR):
+            fp = os.path.join(BACKUP_DIR, fn)
+            if os.path.isfile(fp):
+                os.remove(fp)
+                cleared["backups"] += 1
+        return {"backup": name, "backup_path": path, "cleared": cleared}
+
+    def handle_media_organize(self):
+        with _lock, _media_lock:
+            lib = load_library()
+            plan = media_relocation_plan(lib)
+            backup = backup_media_layout(plan[0]) if plan[0] else None
+            atomic_write_bytes(MEDIA_LAYOUT_PATH, b"categorized\n")
+            result = relocate_media(plan)
+        return self.send_json({"ok": True, "backup": backup, **result})
 
     def handle_media_cleanup(self, expected_token=None):
-        with _lock:
+        with _lock, _media_lock:
             try:
                 candidates, counts, token = scan_unused_media()
                 if expected_token is None:
-                    files = [{"kind": kind, "name": name, "bytes": size}
-                             for kind, name, size, *_ in candidates]
+                    files = [{"kind": kind, "name": name, "bytes": size, "bucket": bucket}
+                             for kind, name, size, _, _, _, bucket in candidates]
                     return self.send_json({"ok": True, "files": files, "bytes": sum(f["bytes"] for f in files),
                                            "folder": MEDIA_STAGING_DIR, "token": token, **counts})
                 if token != expected_token or not candidates:

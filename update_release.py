@@ -32,7 +32,11 @@ REQUIRED = ("server.py", "update_release.py", "VERSION", "web")
 DOCS = ("启动.bat", "README.md", "使用说明.md", "CHANGELOG.md", "发布说明.md")
 MANAGED = REQUIRED + DOCS
 WEB_FILE = re.compile(r"web/(?:[a-zA-Z0-9_-]+/)*[a-zA-Z0-9_.-]+\.(?:js|css|html|json|svg|png|webp|jpg|ico|woff2)")
-DOWNLOAD_HOSTS = {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+GITHUB_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"})
+CNB_HOSTS = frozenset({"cnb.cool", "asset.cnb.cool", "api.cnb.cool"})
+# 发布源按顺序尝试：GitHub 为主，连不上或没有正式版时回退到 CNB 镜像。
+SOURCES = (("GitHub", GITHUB, GITHUB_HOSTS), ("CNB", CNB, CNB_HOSTS))
+DOWNLOAD_HOSTS = GITHUB_HOSTS
 
 
 class UpdateError(Exception):
@@ -57,42 +61,66 @@ def validate_release(value):
     return {key: value.get(key, "") for key in ("format", "version", "archiveSchema", "bytes", "sha256", "notes")}
 
 
-def is_safe_download(url):
+def is_safe_download(url, hosts=GITHUB_HOSTS):
     parts = urlsplit(url)
-    return parts.scheme == "https" and parts.netloc.lower() in DOWNLOAD_HOSTS
+    return parts.scheme == "https" and parts.netloc.lower() in hosts
 
 
 class ReleaseRedirect(HTTPRedirectHandler):
+    def __init__(self, hosts=GITHUB_HOSTS):
+        super().__init__()
+        self.hosts = hosts
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not is_safe_download(newurl):
+        if not is_safe_download(newurl, self.hosts):
             raise UpdateError("下载地址跳转到未授权的网站")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def open_release(url):
-    if not is_safe_download(url):
+def open_release(url, hosts=GITHUB_HOSTS):
+    if not is_safe_download(url, hosts):
         raise UpdateError("下载地址不属于官方仓库")
-    return build_opener(ReleaseRedirect()).open(Request(url, headers={"User-Agent": "PEA-Updater"}), timeout=12)
+    return build_opener(ReleaseRedirect(hosts)).open(Request(url, headers={"User-Agent": "PEA-Updater"}), timeout=12)
+
+
+def release_source(release):
+    """下载包时沿用取清单时的那个源，避免两边版本不同导致校验失败。"""
+    name = release.get("source")
+    for source_name, base, hosts in SOURCES:
+        if source_name == name:
+            return base, hosts
+    return GITHUB, GITHUB_HOSTS
 
 
 def fetch_release():
-    try:
-        with open_release(f"{GITHUB}/releases/latest/download/{METADATA}") as response:
-            raw = response.read(MAX_JSON + 1)
-    except HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise UpdateError(f"GitHub 返回 HTTP {exc.code}，暂时无法检查更新") from exc
-    except (OSError, URLError) as exc:
-        raise UpdateError("无法连接 GitHub，请稍后重试") from exc
-    try:
-        if len(raw) > MAX_JSON:
-            raise ValueError("oversized")
-        release = validate_release(json.loads(raw))
-    except (ValueError, UnicodeError) as exc:
-        raise UpdateError("GitHub 上的发布清单无法读取") from exc
-    release["notes"] = release["notes"][:3000]
-    return release
+    """读取发布清单：GitHub 优先，连不上或没有正式版时回退到 CNB 镜像。"""
+    problems = []
+    for name, base, hosts in SOURCES:
+        try:
+            with open_release(f"{base}/releases/latest/download/{METADATA}", hosts) as response:
+                raw = response.read(MAX_JSON + 1)
+        except HTTPError as exc:
+            if exc.code == 404:
+                problems.append(f"{name} 暂无正式版")
+            else:
+                problems.append(f"{name} 返回 HTTP {exc.code}")
+            continue
+        except (OSError, URLError, UpdateError):
+            problems.append(f"无法连接 {name}")
+            continue
+        try:
+            if len(raw) > MAX_JSON:
+                raise ValueError("oversized")
+            release = validate_release(json.loads(raw))
+        except (ValueError, UnicodeError):
+            problems.append(f"{name} 上的发布清单无法读取")
+            continue
+        release["notes"] = release["notes"][:3000]
+        release["source"] = name
+        return release
+    if all(text.endswith("暂无正式版") for text in problems):
+        return None
+    raise UpdateError("；".join(problems) + "，暂时无法检查更新")
 
 
 def eligibility(release, current, schema):
@@ -174,8 +202,9 @@ def unpack_package(package, target, release):
 
 
 def download_package(release, path):
-    url = f"{GITHUB}/releases/download/v{release['version']}/{PACKAGE}"
-    with open_release(url) as source, path.open("xb") as output:
+    base, hosts = release_source(release)
+    url = f"{base}/releases/download/v{release['version']}/{PACKAGE}"
+    with open_release(url, hosts) as source, path.open("xb") as output:
         count = 0
         while True:
             chunk = source.read(65536)

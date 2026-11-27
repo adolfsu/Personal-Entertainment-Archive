@@ -13,6 +13,7 @@ function load(files) {
 test('browse sessions keep order, navigate, and reconcile deleted works', () => {
   const {browse} = load(['browse-session.js']);
   const session = browse.create(['a', 'b', 'c'], 'b', 'fullscreen');
+  assert.equal(session.page, 'work');
   assert.equal(session.surface, 'fullscreen');
   assert.equal(browse.adjacent(session, -1), 'a');
   assert.equal(browse.adjacent(session, 1), 'c');

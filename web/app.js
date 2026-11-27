@@ -192,6 +192,29 @@ function externalSearchLinksHTML(platforms, keyword) {
   return platforms.map(p => `<a class="source-tab external-search-link" href="${esc(externalSearchUrl(p, keyword))}" target="_blank" rel="noopener noreferrer" aria-label="在 ${esc(p.label)} 搜索 ${esc(keyword)}">${ICONS.search}<span>${esc(p.label)}</span></a>`).join("");
 }
 
+function externalSearchHTML() {
+  return `<div class="external-search" id="externalSearch">
+    <div class="external-search-head">
+      <h4>站外搜索</h4>
+      <span class="hint" id="externalSearchHint"></span>
+    </div>
+    <div class="source-row external-search-platforms" id="externalSearchPlatforms"></div>
+  </div>`;
+}
+
+function bindExternalSearch(input, platforms) {
+  const links = el("#externalSearchPlatforms");
+  const hint = el("#externalSearchHint");
+  const sync = () => {
+    const keyword = input.value.trim();
+    links.style.display = keyword ? "" : "none";
+    links.innerHTML = externalSearchLinksHTML(platforms, keyword);
+    hint.textContent = keyword ? "在新标签页搜索当前作品名" : "输入作品名后即可搜索";
+  };
+  input.addEventListener("input", sync);
+  sync();
+}
+
 const UNDOABLE_PATH = /^\/api\/(works|series|import|import-records|tmdb\/import)(\/|$)/;
 const dataQueue = ArchiveV2.core.createQueue();
 
@@ -1731,7 +1754,7 @@ async function importTmdbToCurrent(mode) {
     : "已导入");
 }
 
-async function saveTmdbCreate() {
+async function saveTmdbCreate(rating) {
   let bgm, backgrounds;
   try { backgrounds = ArchiveV2.backgroundEditor.read(el('#addBody'), 'fImmersiveBackgrounds'); bgm = await ArchiveV2.bgmEditor.read(el('#addBody'), 'workBgm'); } catch (error) { return toast(error.message, true); }
   const a = S.add;
@@ -1757,11 +1780,7 @@ async function saveTmdbCreate() {
       creators,
     },
   };
-  const rEl = el("#fRating");
-  if (rEl) {
-    const v = parseFloat(rEl.value);
-    if (!isNaN(v)) body.rating = v;
-  }
+  if (rating !== null) body.rating = rating;
   const st = el("#fFirstStatus");
   if (st) body.firstExperience = { status: st.value, content: (el("#fFirstContent") || {}).value || "" };
   if (btn) { btn.disabled = true; btn.textContent = "保存中…"; }
@@ -1833,29 +1852,34 @@ function renderAdd() {
   } else if (a.step === 2) {
     const cat = S.categories.find(x => x.key === a.category) || {};
     const sources = cat.sources || ["douban"];
+    const novelPlatforms = a.category === "novel" ? EXTERNAL_SEARCH_PLATFORMS.novel : [];
     body.innerHTML = `
       <div class="source-row">${sources.map((s, i) => `<button class="source-tab ${a.source === s ? "active" : ""}" data-src="${s}" aria-pressed="${a.source === s}">${esc(S.sourceLabels[s] || s)}${i === 0 ? " · 主" : ""}</button>`).join("")}</div>
       ${supportsUnifiedBookmarklet(a.category) ? tmdbImportHTML(a) : ""}
       <div class="search-row">
-        <input id="addKeyword" placeholder="输入作品名，例如 诡秘之主 / 进击的巨人 / 艾尔登法环">
+        <input id="addKeyword" value="${esc(a.keyword || "")}" placeholder="输入作品名，例如 诡秘之主 / 进击的巨人 / 艾尔登法环">
         <button class="btn btn-primary" id="addSearch">${ICONS.search} 搜索</button>
       </div>
+      ${novelPlatforms.length ? externalSearchHTML() : ""}
       ${a.source === "web" ? `<div class="tip">网文兜底：先用必应定位起点 / 番茄的官方书页，再解析。命中不了就直接粘贴链接。</div>` : ""}
       <div class="link-row">
         <input id="addLink" placeholder="粘贴作品链接或书签 JSON（qidian / fanqienovel / ciweimao / douban / bangumi / steam / TMDB / 优书网）">
         <button class="btn" id="parseLink">解析</button>
       </div>
       <div class="results" id="addResults"></div>`;
-    elAll(".source-tab", body).forEach(b => b.onclick = () => { a.source = b.dataset.src; a.items = []; renderAdd(); });
+    const keywordInput = el("#addKeyword");
+    keywordInput.addEventListener("input", () => { a.keyword = keywordInput.value; });
+    elAll("[data-src]", body).forEach(b => b.onclick = () => { a.source = b.dataset.src; a.items = []; renderAdd(); });
+    if (novelPlatforms.length) bindExternalSearch(keywordInput, novelPlatforms);
     el("#addSearch").onclick = doSearch;
-    el("#addKeyword").onkeydown = e => { if (e.key === "Enter") doSearch(); };
+    keywordInput.onkeydown = e => { if (e.key === "Enter") doSearch(); };
     el("#parseLink").onclick = doParseLink;
     el("#addLink").onkeydown = e => { if (e.key === "Enter") doParseLink(); };
     if (supportsUnifiedBookmarklet(a.category)) bindTmdbImport(a);
     renderResults();
     el("#addFoot").innerHTML = `<button class="btn btn-ghost" id="addBack">${ICONS.back} 上一步</button><button class="btn" id="addManual">跳过，手动填写</button>`;
     el("#addBack").onclick = () => { a.step = 1; renderAdd(); };
-    el("#addManual").onclick = () => { a.draft = { title: "", tags: [], creators: [], infobox: [], userFields: [] }; a.step = 3; renderAdd(); };
+    el("#addManual").onclick = () => { a.draft = { title: keywordInput.value.trim(), tags: [], creators: [], infobox: [], userFields: [] }; a.step = 3; renderAdd(); };
   } else {
     renderForm();
   }
@@ -1957,12 +1981,8 @@ function renderForm() {
   const rfSources = (S.categories.find(c => c.key === cat) || {}).sources || [];
   const rfCur = rfSources.includes(a.refSource) ? a.refSource : (rfSources[0] || "");
   const extPlatforms = EXTERNAL_SEARCH_PLATFORMS[cat] || [];
-  const extTitle = (d.title || "").trim();
   const coverSrc = draftCoverSrc(d);
   const hasCover = Boolean(coverSrc);
-  const extHint = extTitle
-    ? "在新标签页打开平台搜索；找到作品后复制详情页链接，粘贴到下方解析。"
-    : "当前标题为空，填写标题后即可使用站外搜索。";
   body.innerHTML = `
     <div class="cover-preview" style="margin-bottom:16px">
       <div class="cp-box">${hasCover ? `<img id="cpImg" src="${esc(coverSrc)}" onerror="this.style.display='none'">` : `<div class="cover-fallback"><span>${esc(catLabel(cat))}</span></div>`}</div>
@@ -1985,11 +2005,8 @@ function renderForm() {
       <div class="form-section-title full"><span>内容与个人记录</span><small>简介和新建时的初始状态</small></div>
       <div class="form-item full"><label>简介</label><textarea id="fSummary" style="min-height:110px">${esc(d.summary || "")}</textarea></div>
       ${a.mode === "create" ? `
-      <div class="form-item"><label>初始评分（可留空）</label>
-        <div class="rating-controls" style="margin:0">
-          <input type="range" id="fRating" min="0" max="10" step="0.5" value="${d.ratingRef != null ? Math.round(d.ratingRef * 2) / 2 : 8}">
-          <div class="score-num" id="fRatingNum">${fmtScore(d.ratingRef != null ? Math.round(d.ratingRef * 2) / 2 : 8)}</div>
-        </div>
+      <div class="form-item"><label for="fRating">初始评分（可留空）</label>
+        <input type="number" id="fRating" min="0" max="10" step="0.5" placeholder="0–10">
       </div>
       <div class="form-item"><label>第一条经历状态</label>
         <select id="fFirstStatus">${Object.entries((S.categories.find(c => c.key === cat) || {}).statuses || GENERIC_STATUS)
@@ -2010,14 +2027,7 @@ function renderForm() {
         <input id="rfKeyword" value="${esc(d.title || "")}" placeholder="用标题搜索该来源">
         <button class="btn btn-primary" id="rfSearch">${ICONS.search} 搜索</button>
       </div>
-      ${a.mode === "edit" && extPlatforms.length ? `
-      <div class="external-search" id="externalSearch">
-        <div class="external-search-head">
-          <h4>站外搜索</h4>
-          <span class="hint" id="externalSearchHint">${esc(extHint)}</span>
-        </div>
-        <div class="source-row external-search-platforms" id="externalSearchPlatforms" style="${extTitle ? "" : "display:none"}">${externalSearchLinksHTML(extPlatforms, extTitle)}</div>
-      </div>` : ""}
+      ${extPlatforms.length ? externalSearchHTML() : ""}
       <div class="link-row">
         <input id="rfLink" placeholder="粘贴作品链接或 TMDB / 优书网书签 JSON">
         <button class="btn" id="rfParse">解析</button>
@@ -2027,10 +2037,6 @@ function renderForm() {
     ${gaps.length ? `<div class="tip">这个分类的常见字段还缺：<div class="gap-list">${gaps.map(g => `<span class="gap-chip">${esc(g)}</span>`).join("")}</div>保存后可点「编辑信息」或用「我的字段」补上，不影响使用。</div>` : ""}
     ${(d.infobox || []).length ? `<div class="tip">已抓到 ${d.infobox.length} 项来源字段，会在沉浸详情的「来源详情」里展示。</div>` : ""}`;
 
-  if (a.mode === "create") {
-    const rg = el("#fRating");
-    rg.oninput = () => el("#fRatingNum").textContent = fmtScore(parseFloat(rg.value));
-  }
   el("#addFoot").innerHTML = a.mode === "edit"
     ? `<button class="btn btn-ghost" id="addCancel">取消</button><button class="btn btn-primary" id="saveWork">保存修改</button>`
     : `<button class="btn btn-ghost" id="addBack2">${ICONS.back} 重新搜索</button><button class="btn btn-primary" id="saveWork">保存入库</button>`;
@@ -2048,21 +2054,7 @@ function renderForm() {
     el("#rfParse").onclick = doRefillParse;
     el("#rfKeyword").onkeydown = ev => { if (ev.key === "Enter") doRefillSearch(); };
     el("#rfLink").onkeydown = ev => { if (ev.key === "Enter") doRefillParse(); };
-    const extBox = el("#externalSearchPlatforms");
-    const extHintEl = el("#externalSearchHint");
-    const titleInput = el("#fTitle");
-    if (extBox && extHintEl && titleInput && extPlatforms.length) {
-      const syncExternalSearch = () => {
-        const kw = (titleInput.value || "").trim();
-        extBox.style.display = kw ? "flex" : "none";
-        extBox.innerHTML = externalSearchLinksHTML(extPlatforms, kw);
-        extHintEl.textContent = kw
-          ? "在新标签页打开平台搜索；找到作品后复制详情页链接，粘贴到下方解析。"
-          : "当前标题为空，填写标题后即可使用站外搜索。";
-      };
-      titleInput.addEventListener("input", syncExternalSearch);
-      syncExternalSearch();
-    }
+    if (extPlatforms.length) bindExternalSearch(el("#fTitle"), extPlatforms);
     bindTmdbImport(a);
     renderRefillResults();
   }
@@ -2199,13 +2191,12 @@ async function saveWork() {
     toast("已保存");
     return;
   }
-  if (a.tmdbRaw) return saveTmdbCreate();
+  const ratingInput = el("#fRating");
+  if (!ratingInput.reportValidity()) return;
+  const rating = ratingInput.value === "" ? null : ratingInput.valueAsNumber;
+  if (a.tmdbRaw) return saveTmdbCreate(rating);
+  draft.rating = rating;
   const body = { category: a.category, draft };
-  const rEl = el("#fRating");
-  if (rEl) {
-    const v = parseFloat(rEl.value);
-    if (!isNaN(v)) body.draft.rating = v;
-  }
   const st = el("#fFirstStatus");
   if (st) body.draft.firstExperience = { status: st.value, content: (el("#fFirstContent") || {}).value || "" };
   const btn = el("#saveWork"); btn.disabled = true; btn.textContent = "保存中…";
@@ -2222,10 +2213,30 @@ function bindMediaCleanup() {
   const scan = el("#mediaScan"), stage = el("#mediaStage"), status = el("#mediaStatus");
   const folder = el("#mediaFolder"), details = el("#mediaDetails"), list = el("#mediaFiles");
   let preview = null;
+  const organize = el("#mediaOrganize"), organizeStatus = el("#mediaOrganizeStatus");
   const sizeLabel = bytes => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const busy = value => {
+    organize.disabled = value;
     scan.disabled = value;
     stage.disabled = value || !preview?.files.length;
+  };
+  organize.onclick = async () => {
+    busy(true);
+    preview = null;
+    details.hidden = true;
+    status.textContent = "";
+    organizeStatus.textContent = "正在备份和整理素材…";
+    const result = await api("/api/media-organize", { method: "POST", body: { organize: true } });
+    if (!result.ok) {
+      organizeStatus.textContent = result.error || "整理失败，请重试";
+    } else {
+      const counts = `已归类 ${result.covers} 张图片、${result.audio} 首音乐。以后保存作品时自动归类。`;
+      const missing = result.missing.length ? ` 有 ${result.missing.length} 个已绑定素材找不到本地文件。` : "";
+      const skipped = result.skipped.length ? ` 有 ${result.skipped.length} 个文件留在原处，可关闭播放后重试。` : "";
+      const backup = result.backup ? ` 备份已保存到 ${result.backup}` : "";
+      organizeStatus.textContent = counts + missing + skipped + backup;
+    }
+    busy(false);
   };
   scan.onclick = async () => {
     preview = null;
@@ -2242,7 +2253,7 @@ function bindMediaCleanup() {
       const held = [result.backupOnly && `备份仍需 ${result.backupOnly} 个`, result.recent && `24 小时内新增或重新选用 ${result.recent} 个`].filter(Boolean);
       status.textContent = (result.files.length ? `图片 ${images} 张，音乐 ${music} 首，共 ${sizeLabel(result.bytes)}。` : "没有可移入暂存区的素材。") +
         (held.length ? `已保留：${held.join("、")}。` : "");
-      list.innerHTML = result.files.map(file => `<li><code>${esc(file.kind)}/${esc(file.name)}</code><span>${sizeLabel(file.bytes)}</span></li>`).join("");
+      list.innerHTML = result.files.map(file => `<li><code>${esc([file.kind, file.bucket, file.name].filter(Boolean).join("/"))}</code><span>${sizeLabel(file.bytes)}</span></li>`).join("");
       details.hidden = !result.files.length;
       details.open = false;
     }
@@ -2381,6 +2392,9 @@ function openSettings() {
       <button class="btn btn-primary btn-sm" id="recImport">开始导入</button>
     </div>
     <div class="backup-list" id="backupList"></div>
+    <div class="section-head" style="margin-top:22px"><h3>素材整理</h3><div class="line"></div></div>
+    <div class="media-cleanup-actions"><button type="button" class="btn" id="mediaOrganize">按分类整理素材</button></div>
+    <p class="tip" id="mediaOrganizeStatus" role="status"></p>
     <div class="section-head" style="margin-top:22px"><h3>素材清理</h3><div class="line"></div></div>
     <div class="media-cleanup">
       <div class="media-cleanup-actions">
