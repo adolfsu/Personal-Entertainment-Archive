@@ -73,7 +73,11 @@ class TestUpdateRelease(unittest.TestCase):
         self.assertEqual(release["version"], "1.10.1")
         self.assertTrue(opened[0].startswith(updater.GITHUB))
         self.assertTrue(opened[1].startswith(updater.CNB))
-        self.assertEqual(updater.release_source(release)[0], updater.CNB)
+        self.assertIn("/-/releases/latest/download/", opened[1])
+        base, hosts = updater.release_source(release)
+        self.assertTrue(base.startswith(updater.CNB))
+        self.assertIn("/-/releases", base)
+        self.assertEqual(hosts, updater.CNB_HOSTS)
         self.assertFalse(updater.is_safe_download("https://cnb.cool.example.com/package", updater.CNB_HOSTS))
 
         def not_found(url, hosts=updater.GITHUB_HOSTS):

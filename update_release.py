@@ -34,8 +34,9 @@ MANAGED = REQUIRED + DOCS
 WEB_FILE = re.compile(r"web/(?:[a-zA-Z0-9_-]+/)*[a-zA-Z0-9_.-]+\.(?:js|css|html|json|svg|png|webp|jpg|ico|woff2)")
 GITHUB_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"})
 CNB_HOSTS = frozenset({"cnb.cool", "asset.cnb.cool", "api.cnb.cool"})
+# 两个仓库的 Release 路径规则不同：GitHub 是 /releases，CNB 是 /-/releases。
 # 发布源按顺序尝试：GitHub 为主，连不上或没有正式版时回退到 CNB 镜像。
-SOURCES = (("GitHub", GITHUB, GITHUB_HOSTS), ("CNB", CNB, CNB_HOSTS))
+SOURCES = (("GitHub", f"{GITHUB}/releases", GITHUB_HOSTS), ("CNB", f"{CNB}/-/releases", CNB_HOSTS))
 DOWNLOAD_HOSTS = GITHUB_HOSTS
 
 
@@ -97,7 +98,7 @@ def fetch_release():
     problems = []
     for name, base, hosts in SOURCES:
         try:
-            with open_release(f"{base}/releases/latest/download/{METADATA}", hosts) as response:
+            with open_release(f"{base}/latest/download/{METADATA}", hosts) as response:
                 raw = response.read(MAX_JSON + 1)
         except HTTPError as exc:
             if exc.code == 404:
@@ -203,7 +204,7 @@ def unpack_package(package, target, release):
 
 def download_package(release, path):
     base, hosts = release_source(release)
-    url = f"{base}/releases/download/v{release['version']}/{PACKAGE}"
+    url = f"{base}/download/v{release['version']}/{PACKAGE}"
     with open_release(url, hosts) as source, path.open("xb") as output:
         count = 0
         while True:
