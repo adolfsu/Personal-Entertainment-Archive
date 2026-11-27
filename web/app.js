@@ -665,8 +665,9 @@ function ensureImmersive() {
       },
       onAddExperience: async (id, experience) => {
         const result = await api(`/api/works/${id}/experience`, { method: "POST", body: experience });
-        if (!result.ok) return toast(result.error || "经历添加失败", true);
+        if (!result.ok) { toast(result.error || "经历添加失败", true); return false; }
         toast("经历已添加");
+        return true;
       },
       onDeleteExperience: async (id, experienceId) => {
         if (!experienceId) return;

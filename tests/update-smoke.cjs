@@ -8,7 +8,7 @@ const cp = require("node:child_process");
 const { chromium } = require(process.env.PEA_PLAYWRIGHT || "playwright");
 const source = path.resolve(__dirname, "..");
 const python = process.env.PEA_PYTHON || "python";
-const names = ["web", "server.py", "update_release.py", "VERSION", "启动.bat", "README.md", "使用说明.md", "CHANGELOG.md", "发布说明.md"];
+const names = ["web", "server.py", "update_release.py", "VERSION", "启动.bat", "desktop.ps1", "启动命令行.bat", "README.md", "使用说明.md", "CHANGELOG.md", "发布说明.md"];
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function idlePort() {
   const server = net.createServer();
@@ -99,7 +99,19 @@ const fixtureServer = [
         await until(async () => { state = await request("/api/update/status"); return state.phase === expected; });
         assert.equal((await request("/api/update/health")).version, mobile ? "1.10.0" : "1.9.0");
         assert.deepEqual(fs.readFileSync(archive), before);
-        if (mobile) assert.ok(fs.existsSync(path.join(live, ".pea-updates", state.job, "previous", "server.py")));
+        if (scenario !== "tamper") {
+          const control = path.join(live, ".pea-control");
+          const info = JSON.parse(fs.readFileSync(path.join(control, "service.json"), "utf8"));
+          assert.equal(info.instance, state.job);
+          assert.equal(info.port, port);
+          assert.equal(info.pid, Number(fs.readFileSync(pid, "ascii")));
+          fs.writeFileSync(path.join(control, "stop-" + info.stop), "");
+          await until(() => !fs.existsSync(path.join(control, "service.json")));
+        }
+        if (mobile) {
+          assert.ok(fs.existsSync(path.join(live, ".pea-updates", state.job, "previous", "desktop.ps1")));
+          assert.deepEqual(fs.readFileSync(path.join(live, "desktop.ps1")), fs.readFileSync(path.join(incoming, "desktop.ps1")));
+        }
         if (scenario === "tamper") await page.locator("#updateStatus").getByText(/校验|大小/).waitFor();
         console.log("Edge: " + scenario + " passed, archive unchanged.");
       } catch (error) {

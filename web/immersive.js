@@ -2,6 +2,7 @@
 (() => {
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[char]);
   const progressKeys = /^(进度|阅读进度|观看进度|游玩进度|当前进度|当前集数|当前章节|完成进度|已读章节|已看集数)$/;
+  const sortedRecords = work => (work.experiences || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
 
   function workContent(work, labels) {
     const rating = work.rating == null ? "未评分" : Number(work.rating).toFixed(1);
@@ -32,7 +33,8 @@
 
   function completeWorkContent(work, labels, seriesLinks = []) {
     const creators = work.creators || [];
-    const experiences = (work.experiences || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+    const experiences = sortedRecords(work);
+    const gallery = ArchiveV2.gallery?.collect(work, experiences);
     const fields = [["年份", work.year], ["状态", labels.status], ["收藏于", (work.createdAt || "").replace("T", " ").slice(0, 16)],
       ["最近经历", work.lastExperienceAt], ["来源", work.source?.label || work.source?.name],
       ["来源评分", work.ratingRef == null ? "" : `${Number(work.ratingRef).toFixed(1)}${work.ratingMeta?.total ? ` · ${work.ratingMeta.total} 人` : ""}`]]
@@ -46,15 +48,16 @@
       <div class="im-copy"><p class="im-eyebrow">个人典藏 <span>／</span> ${esc([labels.category, work.year].filter(Boolean).join(" · "))}</p>
         <h1 id="immersiveTitle" class="im-title">${esc(work.title)}</h1>${work.originalTitle && work.originalTitle !== work.title ? `<p class="im-original">${esc(work.originalTitle)}</p>` : ""}
         ${creators.length ? `<div class="im-creators">${creators.map(person => `<span>${esc(person.role)} ${esc(person.name)}</span>`).join("<i>·</i>")}</div>` : ""}
-        <div class="im-personal"><div class="im-score"><span>个人评分</span><strong>${work.rating == null ? "未评分" : Number(work.rating).toFixed(1)}</strong>${work.rating == null ? "" : "<small>/ 10</small>"}</div><span class="im-status" data-status="${esc(work.status)}">${esc(labels.status)}</span></div>
+        <div class="im-personal"><div class="im-score"><span>个人评分</span><strong>${work.rating == null ? "未评分" : Number(work.rating).toFixed(1)}</strong>${work.rating == null ? "" : "<small>/ 10</small>"}</div><span class="im-status" data-status="${esc(work.status)}">${esc(labels.status)}</span>${gallery ? `<button type="button" class="im-button im-gallery-jump" data-im-action="gallery">画廊${gallery.entries.length ? ` · ${gallery.entries.length}` : ""}</button>` : ""}</div>
         ${tags.length ? `<div class="im-tags">${tags.map(tag => `<span>${esc(tag)}</span>`).join("")}</div>` : ""}
         ${sourceUrl ? `<a class="im-source-link" href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(work.source.label || work.source.name || "来源条目")} ↗</a>` : ""}
         <section class="im-section"><h2>作品简介</h2><div class="im-synopsis">${esc(work.summary || "暂未填写作品简介。")}</div></section>
         <section class="im-section"><h2>作品资料</h2><dl class="im-info-grid">${info(fields) || "<p class='im-muted'>暂无补充资料。</p>"}</dl></section>
         ${infobox.length ? `<section class="im-section"><h2>来源详情 <small>${infobox.length} 项</small></h2><dl class="im-info-grid">${info(infobox.map(item => [item.key, item.value]))}</dl></section>` : ""}
         ${seriesLinks.length ? `<section class="im-section"><h2>所属系列</h2><div class="im-series-links">${seriesLinks.map(link => `<button type="button" data-im-action="series" data-im-series="${esc(link.id)}">${esc(link.name)}<small>${esc(link.role || "")}</small></button>`).join("")}</div></section>` : ""}
-        <section class="im-section im-records"><h2>我的经历 <small>${experiences.length}</small></h2>${experiences.length ? experiences.map(record => `<div class="im-record"><div class="im-record-meta"><time>${esc(record.date)}</time><span>${esc(labels.recordStatus(record.status))}</span>${record.id === work.currentExperienceId ? "<span>当前状态</span>" : ""}<button type="button" data-im-action="delete-experience" data-im-experience="${esc(record.id)}">删除</button></div><p>${esc(record.content || "已记录此状态")}</p></div>`).join("") : "<p class='im-muted'>还没有经历记录。</p>"}
-          <div class="im-work-form"><label>添加经历 <input type="date" data-im-experience-date></label><select data-im-experience-status aria-label="经历状态">${statusOptions.map(([key, value]) => `<option value="${esc(key)}">${esc(value)}</option>`).join("")}</select><textarea data-im-experience-content rows="2" placeholder="进度或备注"></textarea><button type="button" class="im-button" data-im-action="add-experience">添加经历</button></div>
+        ${gallery?.section() || ""}
+        <section class="im-section im-records"><h2>我的经历 <small>${experiences.length}</small></h2>${experiences.length ? experiences.map(record => `<div class="im-record"><div class="im-record-meta"><time>${esc(record.date)}</time><span>${esc(labels.recordStatus(record.status))}</span>${record.id === work.currentExperienceId ? "<span>当前状态</span>" : ""}<button type="button" data-im-action="delete-experience" data-im-experience="${esc(record.id)}">删除</button></div>${record.content || !gallery?.has(record) ? `<p>${esc(record.content || "已记录此状态")}</p>` : ""}${gallery?.forRecord(record) || ""}</div>`).join("") : "<p class='im-muted'>还没有经历记录。</p>"}
+          <div class="im-work-form" data-im-experience-form><label>添加经历 <input type="date" data-im-experience-date></label><select data-im-experience-status aria-label="经历状态">${statusOptions.map(([key, value]) => `<option value="${esc(key)}">${esc(value)}</option>`).join("")}</select><textarea data-im-experience-content rows="2" placeholder="进度或备注" aria-label="经历内容"></textarea>${ArchiveV2.gallery?.editorMarkup || ""}<button type="button" class="im-button" data-im-action="add-experience">添加经历</button></div>
         </section>
         <section class="im-section"><h2>评分记录</h2><div class="im-work-form im-score-form"><label>个人评分 <input type="range" min="0" max="10" step="0.5" value="${work.rating == null ? 8 : Number(work.rating)}" data-im-score-range><output data-im-score-output>${work.rating == null ? "8.0" : Number(work.rating).toFixed(1)}</output></label><input type="text" data-im-score-reason placeholder="评分原因（可选）"><button type="button" class="im-button" data-im-action="save-rating">记录评分</button></div>
           ${history.length ? `<div class="im-rating-history">${history.slice().reverse().map(entry => `<div><time>${esc((entry.at || "").replace("T", " ").slice(0, 16))}</time><strong>${Number(entry.score).toFixed(1)}</strong><span>${esc(entry.reason || "")}</span></div>`).join("")}</div>` : "<p class='im-muted'>还没有评分变化记录。</p>"}
@@ -68,6 +71,7 @@
     const loader = ArchiveV2.backgrounds.createLoader();
     const seriesBackgrounds = ArchiveV2.seriesImmersive.createBackgrounds();
     const music = ArchiveV2.audioPlayer;
+    const experienceImages = ArchiveV2.gallery.create(root, notify);
     let session = null, lastSession = null, origin = null, closeCompletion = null;
     let inertBefore = [], overflowBefore = "", scrollRestorationBefore = "auto", transitionPending = false;
     const historyState = () => history.state?.archiveImmersive;
@@ -166,6 +170,7 @@
       lastSession = { ...session, ids: session.ids.slice() };
       session = null; transitionPending = false; loader.cancel(); seriesBackgrounds.cancel();
       stopFilmEdge();root.classList.remove("filmstrip-open");
+      experienceImages.reset();
       music.close();
       root.hidden = true; root.innerHTML = "";
       inertBefore.forEach(([node, value]) => { node.inert = value; }); inertBefore = [];
@@ -247,6 +252,7 @@
     }
     function render(focusAction = "close") {
       if (!reconcile()) { end(); return; }
+      experienceImages.closeViewer();
       loader.cancel(); seriesBackgrounds.cancel();
       root.dataset.surface = session.surface; root.dataset.background = "default"; root.hidden = false;
       root.dataset.backgroundTone = backgroundTone;
@@ -272,8 +278,7 @@
       </div>`;
       bindPosters();
       mountMusic();
-      const experienceDate = root.querySelector("[data-im-experience-date]");
-      if (experienceDate && !experienceDate.value) experienceDate.value = new Date().toISOString().slice(0, 10);
+      experienceImages.mount(work, sortedRecords(work));
       const scene = root.querySelector(".im-scene");
       renderFilmstrip();
       loader.load(work, (image, kind) => paint(scene, image, kind), getBackgroundSettings(), {startUrl:session.startUrl});
@@ -324,6 +329,11 @@
       const action = event.target.closest("[data-im-action]")?.dataset.imAction;
       if (!action || transitionPending) return;
       if (action === "close") close();
+      else if (action === "gallery") {
+        const gallery = root.querySelector("[data-im-gallery]");
+        gallery?.scrollIntoView({block:"start"});
+        gallery?.focus({preventScroll:true});
+      }
       else if (action === "brightness") toggleBackgroundTone();
       else if (action === "music") document.dispatchEvent(new Event('archive-music-open'));
       else if (action === "previous") navigate(-1);
@@ -346,11 +356,8 @@
         onRateWork(session.currentId, score, reason);
       }
       else if (action === "add-experience" && session?.page === "work") {
-        onAddExperience(session.currentId, {
-          date: root.querySelector("[data-im-experience-date]")?.value || "",
-          status: root.querySelector("[data-im-experience-status]")?.value || "",
-          content: root.querySelector("[data-im-experience-content]")?.value || "",
-        });
+        const id = session.currentId;
+        experienceImages.save(id, experience => onAddExperience(id, experience));
       }
       else if (action === "delete-experience" && session?.page === "work") {
         onDeleteExperience(session.currentId, event.target.closest("[data-im-experience]")?.dataset.imExperience);
@@ -444,6 +451,10 @@
       else if(!event.target.closest(".im-filmstrip,[data-film-reveal]"))root.classList.remove("filmstrip-open");
     };
     root.onkeydown = event => {
+      if (experienceImages.viewer()) {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); experienceImages.closeViewer(); }
+        return;
+      }
       if (event.key === "Escape" && root.classList.contains("filmstrip-open")) {
         event.preventDefault(); event.stopPropagation(); root.classList.remove("filmstrip-open"); return;
       }
@@ -529,7 +540,7 @@
         render(); writeHistory(); return true;
       },
       isOpen: () => !!session,
-      overlayRoot: () => session ? root : null,
+      overlayRoot: () => session ? experienceImages.viewer() || root : null,
       refresh() {
         if (!session) return;
         if (session.editing) return;

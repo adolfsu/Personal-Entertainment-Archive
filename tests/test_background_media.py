@@ -6,6 +6,7 @@ import json
 import os
 import struct
 import tempfile
+import time
 import zipfile
 import zlib
 from unittest import mock
@@ -145,6 +146,37 @@ class TestLocalBackgroundMedia(core.ServerCase):
             self.assertEqual(status, 200, data)
             with zipfile.ZipFile(data['backup_path']) as archive:
                 self.assertEqual(archive.read(url.lstrip('/')), raw)
+
+    def test_experience_images_survive_zip_restore_and_remain_protected(self):
+        first, first_raw = self.add()
+        second, second_raw = self.add((180, 75, 42))
+        _, data = core.http_json('POST', '/api/works', {'category':'book','draft':{'title':'作品','immersiveBackgroundUrls':[first]}})
+        route = '/api/works/' + data['work']['id'] + '/experience'
+        for invalid in [['https://example.com/remote.png'], ['/covers/background_' + '0' * 64 + '.png'], [second] * 21]:
+            self.assertEqual(core.http_json('POST', route, {'imageUrls':invalid})[0], 400)
+        status, data = core.http_json('POST', route, {'imageUrls':[first, second, second]})
+        self.assertEqual(status, 200, data)
+        record = data['work']['experiences'][0]
+        self.assertEqual(record['imageUrls'], [first, second])
+        self.assertEqual(record['content'], '')
+        local = os.path.join(core.server.COVER_DIR, os.path.basename(second))
+        old = time.time() - 2 * core.server.MEDIA_GRACE_SECONDS
+        os.utime(local, (old, old))
+        status, scan = core.http_json('GET', '/api/media-cleanup')
+        self.assertEqual(status, 200, scan)
+        self.assertNotIn(os.path.basename(second), [row['name'] for row in scan['files']])
+        status, raw = core.http('GET', '/api/export?covers=1')
+        self.assertEqual(status, 200, raw[:300] if status != 200 else None)
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            self.assertEqual(archive.namelist().count(first.lstrip('/')), 1)
+            self.assertEqual(archive.read(first.lstrip('/')), first_raw)
+            self.assertEqual(archive.read(second.lstrip('/')), second_raw)
+        os.remove(local)
+        status, data = core.http_json('POST', '/api/import', {'mode':'replace','zip':base64.b64encode(raw).decode()})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(core.http('GET', second)[1], second_raw)
+        _, lib = core.http_json('GET', '/api/bootstrap')
+        self.assertEqual(lib['works'][0]['experiences'][0]['imageUrls'], [first, second])
 
     def test_corrupt_library_blocks_download_and_resource_writes(self):
         core.write_raw(core.server.LIB_PATH, 'broken')

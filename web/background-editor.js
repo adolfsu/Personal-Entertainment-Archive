@@ -3,6 +3,33 @@
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"})[char]);
   const states = new WeakMap();
   const unique = values => [...new Set(values.map(ArchiveV2.backgrounds.safeBackgroundUrl).filter(Boolean))];
+  const imageTypes = /^image\/(png|jpeg|webp|gif)$/i;
+  function pastedFiles(event) {
+    return Array.from(event.clipboardData?.items || [])
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile()).filter(Boolean);
+  }
+  async function clipboardFiles() {
+    const files = [];
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find(value => imageTypes.test(value));
+      if (type) files.push(await item.getType(type));
+    }
+    return files;
+  }
+  async function uploadImage(file) {
+    if ((file.type && !imageTypes.test(file.type)) || !file.size || file.size > 20 * 1024 * 1024) {
+      throw Error('仅支持 20 MB 内的 PNG、JPEG、WebP 或 GIF 图片。');
+    }
+    const response = await fetch('/api/backgrounds/local', {
+      method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file, signal:AbortSignal.timeout(45000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw Error(result.error || '图片保存失败');
+    const url = ArchiveV2.backgrounds.safeBackgroundUrl(result.image?.url);
+    if (!url.startsWith('/covers/')) throw Error('未收到有效的本地图片');
+    return {...result.image, url};
+  }
   function images(entity) {
     return unique(Array.isArray(entity?.immersiveBackgroundUrls) ? entity.immersiveBackgroundUrls : [entity?.immersiveBackgroundUrl]);
   }
@@ -92,18 +119,16 @@
       }
     }
     async function uploadFiles(files) {
+      if (state.busy) return;
       for (const file of Array.from(files || [])) {
         if (urls().length >= 20) { message.textContent = '最多添加 20 张图片，剩余图片未添加。'; break; }
-        if (!/^image\/(png|jpeg|webp|gif)$/i.test(file.type) || file.size > 20 * 1024 * 1024) { message.textContent = '仅支持 20 MB 内的 PNG、JPEG、WebP 或 GIF 图片。'; continue; }
         state.busy = true; box.setAttribute('aria-busy', 'true'); input.disabled = true; add.disabled = true; pasteButton.disabled = true; chooseButton.disabled = true;
         message.textContent = `正在保存：${file.name || '剪贴板图片'}…`;
         try {
-          const response = await fetch('/api/backgrounds/local', {method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});
-          const result = await response.json(); if (!response.ok || !result.ok) throw Error(result.error || '图片保存失败');
-          const local = ArchiveV2.backgrounds.safeBackgroundUrl(result.image?.url); if (!local?.startsWith('/covers/')) throw Error('未收到有效的本地图片');
+          const image = await uploadImage(file);
           if (!box.isConnected) return;
-          const list = urls(); if (!list.includes(local)) list.push(local);
-          commit(list, `图片已保存至本地（${result.image.width} × ${result.image.height}），保存后生效。`);
+          const list = urls(); if (!list.includes(image.url)) list.push(image.url);
+          commit(list, `图片已保存至本地（${image.width} × ${image.height}），保存后生效。`);
         } catch (error) { const text = error.message || '图片保存失败，请重试。'; message.textContent = text; notify(text, true); }
         finally { state.busy = false; box.removeAttribute('aria-busy'); input.disabled = false; add.disabled = false; pasteButton.disabled = false; chooseButton.disabled = false; }
       }
@@ -112,14 +137,13 @@
     fileInput.onchange = () => { uploadFiles(fileInput.files); fileInput.value = ''; };
     pasteButton.onclick = async () => {
       try {
-        const items = await navigator.clipboard.read(), files = [];
-        for (const item of items) for (const type of item.types.filter(type => /^image\/(png|jpeg|webp|gif)$/i.test(type))) files.push(new File([await item.getType(type)], 'clipboard.' + type.split('/')[1], {type}));
+        const files = await clipboardFiles();
         if (!files.length) { message.textContent = '剪贴板中没有可用图片。'; return; }
         uploadFiles(files);
       } catch (_) { message.textContent = '无法读取剪贴板；请聚焦此编辑区后按 Ctrl+V，或选择本地图片。'; }
     };
     box.addEventListener('paste', event => {
-      const files = Array.from(event.clipboardData?.items || []).filter(item => item.kind === 'file' && /^image\/(png|jpeg|webp|gif)$/i.test(item.type)).map(item => item.getAsFile()).filter(Boolean);
+      const files = pastedFiles(event);
       if (!files.length) return;
       event.preventDefault(); uploadFiles(files);
     });
@@ -175,5 +199,5 @@
     if (list.length > 20) throw Error('沉浸背景最多添加 20 张图片');
     return list;
   }
-  globalThis.ArchiveV2 = Object.assign(globalThis.ArchiveV2 || {}, {backgroundEditor:{form,bind,read,images,reorder}});
+  globalThis.ArchiveV2 = Object.assign(globalThis.ArchiveV2 || {}, {backgroundEditor:{form,bind,read,images,reorder,uploadImage,pastedFiles,clipboardFiles}});
 })();

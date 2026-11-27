@@ -26,6 +26,7 @@ import unicodedata
 import uuid
 import webbrowser
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.error import HTTPError, URLError
@@ -2340,19 +2341,10 @@ def save_uploaded_immersive_image(raw):
 
 
 def add_images_to_zip(archive, lib):
-    """封面与本地沉浸原图一起迁移；相同资源只打包一次。"""
-    paths = set()
-    for item in lib.get("works", []) + lib.get("series", []):
-        cover = (item.get("cover") or "").lstrip("/")
-        if cover.startswith("covers/") and os.path.basename(cover) == cover[len("covers/"):]:
-            paths.add(cover)
-        backgrounds = item.get("immersiveBackgroundUrls")
-        if not isinstance(backgrounds, list):
-            backgrounds = [item.get("immersiveBackgroundUrl")]
-        for value in backgrounds:
-            if isinstance(value, str) and re.fullmatch(r"/?covers/[A-Za-z0-9_-]+\.(?:png|jpe?g|webp|gif)", value):
-                paths.add(value.lstrip("/"))
-    for relative in sorted(paths):
+    """打包档案引用的本地图片，相同资源只打包一次。"""
+    paths = {key for item in lib.get("works", []) + lib.get("series", [])
+             for key in item_media_references(item) if key.startswith("covers/")}
+    for relative in sorted(paths, key=lambda key: (key.lower(), key)):
         path = find_media("covers", os.path.basename(relative))
         if path:
             archive.write(path, relative)
@@ -2365,6 +2357,9 @@ def item_media_references(item):
     values = [item.get("cover"), item.get("immersiveBackgroundUrl")]
     if isinstance(item.get("immersiveBackgroundUrls"), list):
         values.extend(item["immersiveBackgroundUrls"])
+    for record in item.get("experiences") or []:
+        if isinstance(record, dict) and isinstance(record.get("imageUrls"), list):
+            values.extend(record["imageUrls"])
     if isinstance(item.get("bgm"), dict):
         values.append(item["bgm"].get("src"))
     for value in values:
@@ -2383,6 +2378,21 @@ def item_media_references(item):
 def media_references(lib):
     return {key.lower() for item in lib.get("works", []) + lib.get("series", [])
             for key in item_media_references(item)}
+
+
+def experience_image_urls(raw):
+    if not isinstance(raw, list) or len(raw) > 20:
+        raise ValueError("每条经历最多添加 20 张图片")
+    urls = []
+    with _media_lock:
+        for url in raw:
+            if (not isinstance(url, str) or
+                    not re.fullmatch(r"/covers/background_[a-f0-9]{64}\.(?:png|jpe?g|webp|gif)", url) or
+                    not find_media("covers", os.path.basename(url))):
+                raise ValueError("有配图无法在本地找到，请移除后重新上传")
+            if url not in urls:
+                urls.append(url)
+    return urls
 
 
 def media_directory(path):
@@ -3746,7 +3756,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def end_headers(self):
         coordinator = getattr(self.server, "updater", None)
-        if coordinator and coordinator.ready:
+        if coordinator and (coordinator.ready or coordinator.stopping):
             self.close_connection = True
             self.send_header("Connection", "close")
         super().end_headers()
@@ -3866,7 +3876,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         try:
             if p == "/api/update/health":
-                return self.send_json({"version": VERSION, "instance": os.environ.get("PEA_UPDATE_INSTANCE", "")})
+                return self.send_json({"version": VERSION, "instance": getattr(self.server, "instance", "")})
             if p == "/api/update/status":
                 return self.send_json({"ok": True, **update_release.update_state(update_release.state_dir(update_release.Path(BASE_DIR)))})
             if p == "/api/update/check":
@@ -3960,9 +3970,9 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         try:
             coordinator = getattr(self.server, "updater", None)
-            if coordinator and coordinator.ready:
+            if coordinator and (coordinator.ready or coordinator.stopping):
                 self.close_connection = True
-                return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
+                return self.send_json({"ok": False, "error": "服务正在关闭，请稍后重试"}, 503)
             if p == "/api/update/install":
                 origin = f"http://127.0.0.1:{self.server.server_address[1]}"
                 if (self.headers.get("Origin") != origin or self.headers.get("Host") != origin[7:] or
@@ -4071,9 +4081,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_PATCH(self):
-        if getattr(self.server, "updater", None) and self.server.updater.ready:
+        coordinator = getattr(self.server, "updater", None)
+        if coordinator and (coordinator.ready or coordinator.stopping):
             self.close_connection = True
-            return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
+            return self.send_json({"ok": False, "error": "服务正在关闭，请稍后重试"}, 503)
         u = urlparse(self.path)
         body = self.read_body()
         try:
@@ -4121,9 +4132,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"ok": False, "error": "not found"}, 404)
 
     def do_DELETE(self):
-        if getattr(self.server, "updater", None) and self.server.updater.ready:
+        coordinator = getattr(self.server, "updater", None)
+        if coordinator and (coordinator.ready or coordinator.stopping):
             self.close_connection = True
-            return self.send_json({"ok": False, "error": "服务正在更新，请稍后重试"}, 503)
+            return self.send_json({"ok": False, "error": "服务正在关闭，请稍后重试"}, 503)
         u = urlparse(self.path)
         try:
             return self._delete(u)
@@ -4394,13 +4406,17 @@ class Handler(BaseHTTPRequestHandler):
                     if status not in STATUS_ORDER:
                         return self.send_json({"ok": False, "error": "状态不合法"}, 400)
                     content = (body.get("content") or "").strip()
-                    if not content and not body.get("date"):
+                    images = experience_image_urls(body.get("imageUrls", []))
+                    if not content and not images and not body.get("date"):
                         return self.send_json({"ok": False, "error": "经历内容不能为空"}, 400)
-                    w.setdefault("experiences", []).append({
+                    record = {
                         "id": new_id("e_"),
                         "date": body.get("date") or datetime.now().strftime("%Y-%m-%d"),
                         "content": content, "status": status, "createdAt": now_iso(),
-                    })
+                    }
+                    if images:
+                        record["imageUrls"] = images
+                    w.setdefault("experiences", []).append(record)
                 w["updatedAt"] = now_iso()
                 save_library(lib)
                 return self.send_json({"ok": True, "work": work_view(w)})
@@ -4955,13 +4971,78 @@ class UpdateAwareHTTPServer(ThreadingHTTPServer):
     # Drain existing requests before the installer can replace program files.
     daemon_threads = False
 
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    if os.name == "nt":
+        allow_reuse_address = False
+
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(8)
         return connection, address
 
 
+@contextmanager
+def service_slot(directory):
+    directory.mkdir(exist_ok=True)
+    with (directory / "service.lock").open("a+b") as stream:
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+        else:
+            yield True
+
+
+def watch_stop_request(httpd, request, done):
+    while not done.wait(0.2):
+        if request.is_file() and httpd.updater.begin_stop():
+            log_event("service", "stop")
+            httpd.shutdown()
+            return
+
+
 def main():
+    base = update_release.Path(BASE_DIR)
+    control = base / ".pea-control"
+    if control.is_symlink() or (control.exists() and update_release.linked(control)):
+        print("服务状态目录不能是链接。")
+        return 1
+    ready = None
+    with service_slot(control) as acquired:
+        if not acquired:
+            print("此项目的服务已经启动，请在桌面控制台打开。")
+            return 2
+        if update_release.restart_in_progress(base):
+            print("此项目正在更新，请稍后再启动。")
+            return 2
+        if PORT and _port_alive(PORT):
+            print(f"端口 {PORT} 已被占用。请用桌面控制台自动选择可用地址。")
+            return 2
+        try:
+            httpd = UpdateAwareHTTPServer(("127.0.0.1", PORT), Handler)
+        except OSError as e:
+            print(f"无法启动本地服务：{e}")
+            return 1
+        try:
+            ready = serve_project(httpd, control)
+        finally:
+            httpd.server_close()
+    if ready:
+        ready.touch()
+        return 75
+
+
+def serve_project(httpd, control):
     ensure_dirs()
     corrupt_error = ""
     try:
@@ -4972,27 +5053,14 @@ def main():
         lib = None
         corrupt_error = f"{e.reason}：{e.detail}" if e.detail else e.reason
         log_event("startup", "load", "corrupt", corrupt_error, logging.ERROR)
-    if _port_alive(PORT):
-        print("=" * 52)
-        print(f"  {PORT} 端口上已经有一个实例在跑，这次不再重复启动。")
-        print(f"  已为你打开：http://127.0.0.1:{PORT}")
-        print("  （Windows 允许多个进程绑同一端口，所以之前会出现两个实例。）")
-        print("  如果刚同步过项目文件，请先关掉旧窗口再启动，否则页面显示的仍是旧版本。")
-        print("=" * 52)
-        try:
-            webbrowser.open(f"http://127.0.0.1:{PORT}")
-        except Exception:
-            pass
-        return
-    try:
-        httpd = UpdateAwareHTTPServer(("127.0.0.1", PORT), Handler)
-        httpd.updater = update_release.Coordinator(httpd, BASE_DIR, VERSION, LIB_VERSION)
-    except OSError as e:
-        print("=" * 52)
-        print(f"  启动失败：端口 {PORT} 无法绑定（{e}）")
-        print("  想换端口就在命令行里先执行 set GRDAG_PORT=8899 再运行。")
-        print("=" * 52)
-        return
+    httpd.updater = update_release.Coordinator(httpd, BASE_DIR, VERSION, LIB_VERSION)
+    httpd.instance = os.environ.get("PEA_UPDATE_INSTANCE") or uuid.uuid4().hex
+    port = httpd.server_address[1]
+    stop_id = uuid.uuid4().hex
+    record = control / "service.json"
+    request = control / f"stop-{stop_id}"
+    update_release.write_json(record, {"pid": os.getpid(), "port": port, "version": VERSION,
+                                       "instance": httpd.instance, "stop": stop_id})
     print("=" * 52)
     print("  娱乐档案 · 本地服务")
     print(f"  当前版本：{VERSION}（读取自 VERSION 文件）")
@@ -5002,7 +5070,7 @@ def main():
     print(f"  数据文件：{LIB_PATH}")
     print(f"  封面目录：{COVER_DIR}")
     print(f"  备份目录：{BACKUP_DIR}")
-    print(f"  访问地址：http://127.0.0.1:{PORT}")
+    print(f"  访问地址：http://127.0.0.1:{port}")
     if lib is None:
         print("  ｜ 主档案损坏，已停止写入保护原文件")
         print(f"  ｜ 原因：{corrupt_error}")
@@ -5010,19 +5078,24 @@ def main():
     else:
         print(f"  作品数量：{len(lib['works'])}")
     print("  关闭这个窗口 = 停止服务，数据已写盘")
-    log_event("startup", "serve", "ok", f"version={VERSION} port={PORT}")
+    log_event("startup", "serve", "ok", f"version={VERSION} port={port}")
     print("=" * 52)
     if not os.environ.get("GRDAG_NO_BROWSER"):
-        threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    done = threading.Event()
+    watcher = threading.Thread(target=watch_stop_request, args=(httpd, request, done), daemon=True)
+    watcher.start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止。")
     finally:
+        done.set()
+        watcher.join()
         httpd.server_close()
-        if httpd.updater.ready:
-            httpd.updater.ready.touch()
-            return 75
+        request.unlink(missing_ok=True)
+        record.unlink(missing_ok=True)
+    return httpd.updater.ready
 
 
 if __name__ == "__main__":

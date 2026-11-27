@@ -30,7 +30,8 @@ MAX_PACKAGE = 32 * 1024 * 1024
 MAX_CONTENT = 64 * 1024 * 1024
 REQUIRED = ("server.py", "update_release.py", "VERSION", "web")
 DOCS = ("启动.bat", "README.md", "使用说明.md", "CHANGELOG.md", "发布说明.md")
-MANAGED = REQUIRED + DOCS
+DESKTOP = ("desktop.ps1", "启动命令行.bat")
+MANAGED = REQUIRED + DOCS + DESKTOP
 WEB_FILE = re.compile(r"web/(?:[a-zA-Z0-9_-]+/)*[a-zA-Z0-9_.-]+\.(?:js|css|html|json|svg|png|webp|jpg|ico|woff2)")
 GITHUB_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"})
 CNB_HOSTS = frozenset({"cnb.cool", "asset.cnb.cool", "api.cnb.cool"})
@@ -135,7 +136,7 @@ def eligibility(release, current, schema):
 
 
 def allowed_file(name):
-    if name in ("server.py", "update_release.py", "VERSION", *DOCS):
+    if name in ("server.py", "update_release.py", "VERSION", *DOCS, *DESKTOP):
         return True
     if not WEB_FILE.fullmatch(name):
         return False
@@ -232,7 +233,16 @@ def update_state(directory):
 
 
 def set_state(directory, job, phase, message):
-    write_json(directory / "state.json", {"job": job, "phase": phase, "message": message})
+    write_json(directory / "state.json", {"job": job, "phase": phase, "message": message,
+                                          "updatedAt": int(time.time())})
+
+
+def restart_in_progress(base):
+    state = update_state(state_dir(base))
+    return (state.get("phase") == "restarting" and
+            isinstance(state.get("updatedAt"), int) and
+            0 <= time.time() - state["updatedAt"] < 210 and
+            state.get("job") != os.environ.get("PEA_UPDATE_INSTANCE"))
 
 
 def launch_options():
@@ -247,6 +257,15 @@ class Coordinator:
         self.schema = schema
         self.lock = threading.Lock()
         self.ready = None
+        self.stopping = False
+
+    def begin_stop(self):
+        with self.lock:
+            worker = getattr(self, "worker", None)
+            if self.ready or self.stopping or (worker and worker.is_alive()):
+                return False
+            self.stopping = True
+            return True
 
     def check(self, disk_version):
         if disk_version != self.version:
@@ -262,7 +281,9 @@ class Coordinator:
             raise UpdateError("请先检查更新")
         root = state_dir(self.base)
         with self.lock:
-            if self.ready is not None or update_state(root).get("phase") in ("downloading", "restarting") and getattr(self, "worker", None) is not None and self.worker.is_alive():
+            if self.stopping:
+                raise UpdateError("正在停止服务")
+            if self.ready is not None or (getattr(self, "worker", None) and self.worker.is_alive()):
                 raise UpdateError("已有更新正在处理")
             if disk_version != self.version:
                 raise UpdateError("请先重启到磁盘版本")
@@ -347,6 +368,7 @@ def apply_update(work):
             set_state(root, job, "failed", "旧服务尚未停止，未替换程序文件")
             return
         time.sleep(0.2)
+    set_state(root, job, "restarting", "正在安装并验证新版本…")
     backup = work / "previous"
     incoming = work / "new"
     saved, installed = [], []
@@ -388,6 +410,7 @@ def build_package(base, out, schema):
     out.mkdir(parents=True, exist_ok=True)
     package = out / PACKAGE
     files = [base / name for name in (*REQUIRED, *DOCS) if name != "web"]
+    files.extend(base / name for name in DESKTOP if (base / name).is_file())
     if linked(base / "web"):
         raise UpdateError("web 目录不能是链接")
     files.extend(sorted(path for path in (base / "web").rglob("*") if path.is_file()))

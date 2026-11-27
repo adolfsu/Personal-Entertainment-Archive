@@ -61,6 +61,8 @@
 
 项目目录里放一份 `runtime\python\python.exe`（Windows 便携版 Python），双击 `启动.bat` 即可，无需安装 Python。
 
+桌面控制台会启动本地服务并打开档案网页。可在窗口中停止、重启、检查更新或查看日志。关闭网页后，仍可在控制台管理服务。退出时可直接关闭控制台并确认停止。默认地址被占用时，控制台会自动换用可用地址。
+
 > 公开仓库里**没有** `runtime/`：它约 43 MB、几千个文件，超过 GitHub 网页上传的单文件 / 文件数限制。需要的话自己下载 Windows embeddable Python 解压到 `runtime\python\`，或直接用方式二。
 
 ### 方式二：用本机 Python
@@ -78,14 +80,16 @@ set GRDAG_PORT=8899   # Windows
 python server.py
 ```
 
-窗口就是服务本身，关掉窗口即停止；重复启动不会起第二个实例（会直接打开已有实例）。
+也可双击 `启动命令行.bat` 在命令行窗口运行。若需要打开或管理已运行的实例，双击 `启动.bat` 打开控制台。
 
 ## 目录结构
 
 ```
 娱乐档案/
 ├─ server.py          # 本地 HTTP 服务、抓取、封面缓存、导入导出
-├─ 启动.bat            # 一键启动（优先 runtime，其次系统 Python）
+├─ 启动.bat            # 打开 Windows 桌面控制台
+├─ desktop.ps1         # 桌面控制台与服务管理
+├─ 启动命令行.bat      # 保留命令行启动入口
 ├─ web/
 │  ├─ index.html
 │  ├─ app.js           # 前端逻辑（原生 JS，无构建）
