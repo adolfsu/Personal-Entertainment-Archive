@@ -393,6 +393,7 @@ def default_library():
     return {"version": LIB_VERSION, "works": [], "series": [],
             "settings": {"proxy": "auto", "proxy_port": "7897", "backup_keep": 30,
                          "immersive_background_interval": 12, "immersive_background_order": "ordered",
+                         "work_detail_layout": "card",
                          "home_hidden_work_ids": []}}
 
 
@@ -4747,7 +4748,7 @@ class Handler(BaseHTTPRequestHandler):
         cleared = {"works": len(lib.get("works") or []), "series": len(lib.get("series") or []),
                    "covers": 0, "audio": 0, "backups": 0}
         newlib = default_library()
-        for k in ("proxy", "proxy_port", "backup_keep", "immersive_background_interval", "immersive_background_order"):
+        for k in ("proxy", "proxy_port", "backup_keep", "immersive_background_interval", "immersive_background_order", "work_detail_layout"):
             if k in lib.get("settings", {}):
                 newlib["settings"][k] = lib["settings"][k]
         write_library(newlib)
@@ -4790,6 +4791,11 @@ class Handler(BaseHTTPRequestHandler):
     def handle_settings(self, body):
         with _lock:
             lib = load_library()
+            if "work_detail_layout" in body:
+                layout = body["work_detail_layout"]
+                if layout not in ("card", "exhibit"):
+                    raise ValueError("作品详情样式无效")
+                lib["settings"]["work_detail_layout"] = layout
             if "home_hidden_work_ids" in body:
                 hidden_ids = body["home_hidden_work_ids"]
                 if not isinstance(hidden_ids, list) or any(not isinstance(work_id, str) for work_id in hidden_ids):

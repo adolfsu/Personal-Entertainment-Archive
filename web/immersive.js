@@ -258,6 +258,8 @@
       root.dataset.backgroundTone = backgroundTone;
       if (session.page === "series") { renderSeries(focusAction); return; }
       root.dataset.view = "work";
+      const settings = getBackgroundSettings();
+      root.dataset.workLayout = settings.work_detail_layout === "exhibit" ? "exhibit" : "card";
       const work = getWork(session.currentId);
       const labels = getLabels(work);
       const index = session.ids.indexOf(session.currentId);
@@ -281,7 +283,7 @@
       experienceImages.mount(work, sortedRecords(work));
       const scene = root.querySelector(".im-scene");
       renderFilmstrip();
-      loader.load(work, (image, kind) => paint(scene, image, kind), getBackgroundSettings(), {startUrl:session.startUrl});
+      loader.load(work, (image, kind) => paint(scene, image, kind), settings, {startUrl:session.startUrl});
       session.startUrl = "";
       requestAnimationFrame(() => {
         if (!session) return;

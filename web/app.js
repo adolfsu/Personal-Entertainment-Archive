@@ -2356,6 +2356,13 @@ function openSettings() {
       <div class="seg" id="setThemeSeg"><button data-v="stage">展厅（默认）</button><button data-v="shelf">书架</button></div>
     </div>
     <div class="option-line" style="margin-bottom:16px">
+      <label class="opt-label" for="setWorkDetailLayout">无大图详情</label>
+      <select id="setWorkDetailLayout" class="mini">
+        <option value="card">卡片 · 左图右文</option>
+        <option value="exhibit"${st.work_detail_layout === "exhibit" ? " selected" : ""}>展厅 · 左文右图</option>
+      </select>
+    </div>
+    <div class="option-line" style="margin-bottom:16px">
       <label class="opt-label" for="setUiScale">界面缩放</label>
       <select id="setUiScale" class="mini">${["100", "115", "130", "150"].map(value => `<option value="${value}"${value === APPEARANCE.scale ? " selected" : ""}>${value}%${value === "100" ? "（默认）" : ""}</option>`).join("")}</select>
     </div>
@@ -2621,6 +2628,7 @@ function bindGlobal() {
   el("#settingsModal").onclick = (e) => { if (e.target.id === "settingsModal") closeSettings(); };
   el("#saveSettings").onclick = async () => {
     const body = { proxy: el("#setProxy").value.trim() || "auto", backup_keep: Number(el("#setKeep").value) || 30,
+      work_detail_layout: el("#setWorkDetailLayout").value,
       immersive_background_order: el("#setBackgroundOrder").value,
       immersive_background_interval: Math.max(3, Math.min(300, Number(el("#setBackgroundInterval").value) || 12)) };
     const r = await api("/api/settings", { method: "POST", body });
